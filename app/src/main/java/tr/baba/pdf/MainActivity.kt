@@ -171,6 +171,8 @@ fun App(initialUri: Uri?) {
         }
     }
 
+    var editMarkIdx by remember { mutableIntStateOf(0) }
+    val saveZipImg = saveZip
     var p12Uri by remember { mutableStateOf<Uri?>(null) }
     val p12Launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -213,7 +215,12 @@ fun App(initialUri: Uri?) {
                 actions = {
                     if (hasDoc) TextButton(onClick = { dialog = "search" }) { Text("Ara") }
                     TextButton(onClick = { menu = true }) { Text("Menü") }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false; menuFilter = "" }) {
+                        OutlinedTextField(
+                            value = menuFilter, onValueChange = { menuFilter = it },
+                            label = { Text("Komut ara…") }, singleLine = true,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
                         Header("Dosya")
                         MenuItem("Belge aç (PDF, e-kitap)") { menu = false; openLauncher.launch(arrayOf("*/*")) }
                         MenuItem("Belge ekle / birleştir") { menu = false; mergeLauncher.launch(arrayOf("*/*")) }
@@ -291,6 +298,16 @@ fun App(initialUri: Uri?) {
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
                             MenuItem("OCR: taranmış PDF'i aranabilir yap") { menu = false; dialog = "ocrpdf" }
                             MenuItem("OCR: sayfaları metne çıkar (.txt)") { menu = false; dialog = "ocrtxt" }
+                            MenuItem("Gömülü görselleri ayıkla (ZIP)") { menu = false; dialog = "imgs" }
+                            MenuItem("Sayfa boyutunu değiştir (A4 vb.)") { menu = false; dialog = "psize" }
+                            MenuItem("Yan/ters sayfaları otomatik döndür") {
+                                menu = false
+                                scope.launch {
+                                    doc.transformWith<Int>({ n -> if (n == 0) "Düzeltilecek sayfa bulunamadı" else "$n sayfa döndürüldü" }) { s, o ->
+                                        PdfOps3.autoRotate(s, o)
+                                    }
+                                }
+                            }
                             MenuItem("Sayfa kenarlarını kırp") { menu = false; dialog = "crop" }
                             MenuItem("Yazdır") {
                                 menu = false
@@ -707,6 +724,61 @@ fun App(initialUri: Uri?) {
             { dialog = null }
         )
 
+        "editmark" -> MultiInputDialog(
+            "Yer imini düzenle",
+            listOf("Başlık", "Hedef sayfa (boş: değişmesin)"),
+            listOf(marks.getOrNull(editMarkIdx)?.title ?: "", ""),
+            { v ->
+                dialog = null
+                val idx = editMarkIdx
+                val pg = v[1].trim().toIntOrNull()
+                if (v[0].isBlank()) {
+                    doc.message = "Başlık boş olamaz"
+                } else {
+                    scope.launch { doc.transform("Yer imi güncellendi") { s, o -> PdfOps3.editBookmark(s, o, idx, v[0].trim(), pg) } }
+                }
+            },
+            { dialog = null }
+        )
+
+        "imgs" -> InputDialog("Gömülü görselleri ayıkla (ZIP)", "Sayfa aralığı", all, { v ->
+            dialog = null
+            try {
+                val pages = PdfOps.parseRange(v, total)
+                pendingWrite = { u -> scope.launch { doc.exportImagesZip(u, pages) } }
+                saveZipImg.launch("${base}_gorseller.zip")
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
+        }, { dialog = null })
+
+        "psize" -> MultiInputDialog(
+            "Sayfa boyutu (A3, A4, A5, Letter veya GENxYÜK pt)",
+            listOf("Sayfa aralığı", "Boyut"),
+            listOf(all, "A4"),
+            { v ->
+                dialog = null
+                try {
+                    val pages = PdfOps.parseRange(v[0], total)
+                    val sz = when (v[1].trim().uppercase()) {
+                        "A3" -> 842f to 1191f
+                        "A4" -> 595f to 842f
+                        "A5" -> 420f to 595f
+                        "LETTER" -> 612f to 792f
+                        "LEGAL" -> 612f to 1008f
+                        else -> {
+                            val p = v[1].lowercase().split('x')
+                            p[0].trim().toFloat() to p[1].trim().toFloat()
+                        }
+                    }
+                    scope.launch { doc.transform("Sayfa boyutu değişti") { s, o -> PdfOps3.pageSize(s, o, pages, sz.first, sz.second) } }
+                } catch (e: Exception) {
+                    doc.message = "Geçersiz boyut: A4 veya 600x800 biçiminde yazın"
+                }
+            },
+            { dialog = null }
+        )
+
         "crop" -> MultiInputDialog(
             "Kenarları kırp (pt; 1 cm ≈ 28)",
             listOf("Sayfa aralığı", "Sol", "Üst", "Sağ", "Alt"),
@@ -893,16 +965,24 @@ fun App(initialUri: Uri?) {
                     Text("Bu belgede yer imi yok.")
                 } else {
                     LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                        items(marks) { m ->
-                            Text(
-                                m.title.ifBlank { "(adsız)" } + if (m.page >= 0) "  ·  s. ${m.page + 1}" else "",
-                                modifier = Modifier.fillMaxWidth()
-                                    .clickable {
-                                        dialog = null
-                                        if (m.page >= 0) goTo(m.page + 1)
-                                    }
-                                    .padding(start = (m.level * 16).dp, top = 8.dp, bottom = 8.dp)
-                            )
+                        items(marks.size) { mi ->
+                            val m = marks[mi]
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    m.title.ifBlank { "(adsız)" } + if (m.page >= 0) "  ·  s. ${m.page + 1}" else "",
+                                    modifier = Modifier.weight(1f)
+                                        .clickable {
+                                            dialog = null
+                                            if (m.page >= 0) goTo(m.page + 1)
+                                        }
+                                        .padding(start = (m.level * 16).dp, top = 8.dp, bottom = 8.dp)
+                                )
+                                TextButton(onClick = { editMarkIdx = mi; dialog = "editmark" }) { Text("Düzenle") }
+                                TextButton(onClick = {
+                                    dialog = null
+                                    scope.launch { doc.transform("Yer imi silindi") { s, o -> PdfOps3.deleteBookmark(s, o, mi) } }
+                                }) { Text("Sil") }
+                            }
                         }
                     }
                 }
@@ -989,8 +1069,11 @@ private fun PermDialog(
     )
 }
 
+private var menuFilter by mutableStateOf("")
+
 @Composable
 private fun Header(text: String) {
+    if (menuFilter.isNotBlank()) return
     DropdownMenuItem(
         text = { Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) },
         onClick = {},
@@ -1000,7 +1083,8 @@ private fun Header(text: String) {
 
 @Composable
 private fun MenuItem(text: String, onClick: () -> Unit) {
-    DropdownMenuItem(text = { Text(text) }, onClick = onClick)
+    if (menuFilter.isNotBlank() && !text.contains(menuFilter.trim(), ignoreCase = true)) return
+    DropdownMenuItem(text = { Text(text) }, onClick = { menuFilter = ""; onClick() })
 }
 
 @Composable

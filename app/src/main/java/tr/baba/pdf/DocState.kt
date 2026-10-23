@@ -411,6 +411,12 @@ class DocState(private val app: Context) {
         }
     }
 
+    suspend fun exportImagesZip(uri: Uri, pages: Set<Int>) = guarded {
+        val src = file ?: return@guarded
+        val n = withContext(Dispatchers.IO) { var c = 0; write(uri) { o -> c = PdfOps3.extractImagesZip(src, pages, o) }; c }
+        message = if (n == 0) "Gömülü görsel bulunamadı (boş ZIP yazıldı)" else "$n görsel ZIP olarak kaydedildi"
+    }
+
     suspend fun ocrSearchable(pages: Set<Int>) =
         transformWith<Int>({ n -> if (n == 0) "Sayfalarda metin bulunamadı" else "$n sayfaya aranabilir metin katmanı eklendi" }) { s, o ->
             Ocr.makeSearchable(app, s, o, pages)
