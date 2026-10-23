@@ -80,6 +80,10 @@ class P12Signer(p12: File, password: String) : PKCS7Signer() {
     override fun maxDigest(): Int = 4096 + chain.sumOf { it.encoded.size } * 2
 }
 
+@Suppress("UNCHECKED_CAST")
+private fun sel(s: Any): org.bouncycastle.util.Selector<org.bouncycastle.cert.X509CertificateHolder> =
+    s as org.bouncycastle.util.Selector<org.bouncycastle.cert.X509CertificateHolder>
+
 /** İmza doğrulayıcı: özet BouncyCastle ile, güven zinciri Android sistem sertifikalarıyla denetlenir. */
 class BcVerifier : PKCS7Verifier() {
     private val bc = BouncyCastleProvider()
@@ -92,7 +96,7 @@ class BcVerifier : PKCS7Verifier() {
             var any = false
             for (si in sd.signerInfos.signers) {
                 any = true
-                val holder = certs.getMatches(si.sid).firstOrNull() ?: return PKCS7Verifier.PKCS7VerifierNoCertificate
+                val holder = certs.getMatches(sel(si.sid)).firstOrNull() ?: return PKCS7Verifier.PKCS7VerifierNoCertificate
                 val v = JcaSimpleSignerInfoVerifierBuilder().setProvider(bc).build(holder as org.bouncycastle.cert.X509CertificateHolder)
                 if (!si.verify(v)) return PKCS7Verifier.PKCS7VerifierDigestFailure
             }
@@ -112,7 +116,7 @@ class BcVerifier : PKCS7Verifier() {
             if (certs.isEmpty()) return PKCS7Verifier.PKCS7VerifierNoCertificate
             val signerId = sd.signerInfos.signers.firstOrNull()?.sid
             val leaf = certs.firstOrNull { c ->
-                signerId != null && sd.certificates.getMatches(signerId).any {
+                signerId != null && sd.certificates.getMatches(sel(signerId)).any {
                     (it as org.bouncycastle.cert.X509CertificateHolder).encoded.contentEquals(c.encoded)
                 }
             } ?: certs[0]
