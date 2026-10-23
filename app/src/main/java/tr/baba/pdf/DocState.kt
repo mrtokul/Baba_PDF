@@ -90,8 +90,20 @@ class DocState(private val app: Context) {
     suspend fun open(uri: Uri) = guarded {
         val nm = withContext(Dispatchers.IO) { PdfOps.displayName(app, uri) }
         val ext = nm.substringAfterLast('.', "pdf").lowercase().filter { it.isLetterOrDigit() }.ifEmpty { "pdf" }
-        val tmp = newFile(ext)
+        var tmp = newFile(ext)
         withContext(Dispatchers.IO) { PdfOps.copyUri(app, uri, tmp) }
+        if (ext in Converters.EXTS) {
+            val h = newFile("html")
+            try {
+                withContext(Dispatchers.IO) { Converters.toHtml(tmp, ext, h) }
+            } catch (e: Exception) {
+                h.delete()
+                tmp.delete()
+                throw e
+            }
+            tmp.delete()
+            tmp = h
+        }
         tryOpen(tmp, null, nm, uri, ext != "pdf")
     }
 
