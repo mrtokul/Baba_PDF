@@ -18,7 +18,9 @@ jobs:
         with:
           gradle-version: '8.10.2'
       - name: Debug APK derle
-        run: gradle --no-daemon assembleDebug
+        run: |
+          set -o pipefail
+          gradle --no-daemon assembleDebug 2>&1 | tee build.log || { grep -E "^e: |What went wrong|Could not|Duplicate|error:" -A2 build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: BabaPDF-apk
