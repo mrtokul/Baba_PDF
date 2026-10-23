@@ -51,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -66,6 +67,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import kotlinx.coroutines.launch
@@ -95,6 +97,17 @@ private val INVERT = ColorMatrix(
     )
 )
 
+private val SEPIA = ColorMatrix(
+    floatArrayOf(
+        0.393f, 0.769f, 0.189f, 0f, 0f,
+        0.349f, 0.686f, 0.168f, 0f, 0f,
+        0.272f, 0.534f, 0.131f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    )
+)
+
+private val MODE_NAMES = listOf("Normal", "Koyu", "Sepya")
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(initialUri: Uri?) {
@@ -106,9 +119,13 @@ fun App(initialUri: Uri?) {
 
     var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<String?>(null) }
-    var invert by remember { mutableStateOf(false) }
+    var pageMode by remember { mutableIntStateOf(0) }
     var zoom by remember { mutableFloatStateOf(1f) }
-    var hits by remember { mutableStateOf<List<PdfOps.Hit>?>(null) }
+    var hits by remember { mutableStateOf<List<PdfOps.Hit>>(emptyList()) }
+    var hitIdx by remember { mutableIntStateOf(0) }
+    var showHits by remember { mutableStateOf(false) }
+    var marks by remember { mutableStateOf<List<PdfOps.Mark>>(emptyList()) }
+    var info by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var pendingWrite by remember { mutableStateOf<((Uri) -> Unit)?>(null) }
 
     val current by remember { derivedStateOf { listState.firstVisibleItemIndex } }
@@ -128,6 +145,9 @@ fun App(initialUri: Uri?) {
     val savePng = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
         if (uri != null) pendingWrite?.invoke(uri)
     }
+    val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) pendingWrite?.invoke(uri)
+    }
 
     LaunchedEffect(Unit) { initialUri?.let { doc.open(it) } }
     LaunchedEffect(doc.message) {
@@ -137,11 +157,23 @@ fun App(initialUri: Uri?) {
         }
     }
 
-    val base = doc.name.removeSuffix(".pdf").removeSuffix(".PDF").ifBlank { "belge" }
+    val base = doc.name.substringBeforeLast('.', doc.name).ifBlank { "belge" }
     val hasDoc = doc.file != null
+    val total = doc.pageCount
+    val all = "1-$total"
 
     val renderer = remember(doc.file, doc.version) { doc.file?.let { PageRenderer(it) } }
     DisposableEffect(renderer) { onDispose { renderer?.close() } }
+
+    fun goTo(page1: Int) {
+        scope.launch { listState.scrollToItem((page1 - 1).coerceIn(0, (total - 1).coerceAtLeast(0))) }
+    }
+
+    fun stepHit(delta: Int) {
+        if (hits.isEmpty()) return
+        hitIdx = ((hitIdx + delta) % hits.size + hits.size) % hits.size
+        goTo(hits[hitIdx].page)
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snack) },
@@ -152,35 +184,68 @@ fun App(initialUri: Uri?) {
                     if (hasDoc) TextButton(onClick = { dialog = "search" }) { Text("Ara") }
                     TextButton(onClick = { menu = true }) { Text("Menü") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        MenuItem("PDF aç") { menu = false; openLauncher.launch(arrayOf("application/pdf")) }
-                        MenuItem("PDF birleştir") { menu = false; mergeLauncher.launch(arrayOf("application/pdf")) }
+                        Header("Dosya")
+                        MenuItem("Belge aç (PDF, e-kitap)") { menu = false; openLauncher.launch(arrayOf("*/*")) }
+                        MenuItem("Belge ekle / birleştir") { menu = false; mergeLauncher.launch(arrayOf("*/*")) }
                         if (hasDoc) {
-                            MenuItem("Kaydet (PDF)") {
+                            if (doc.canOverwrite) MenuItem("Kaydet (özgün dosyanın üzerine)") { menu = false; dialog = "overwrite" }
+                            MenuItem("Farklı kaydet (PDF)") {
                                 menu = false
                                 pendingWrite = { u -> scope.launch { doc.exportPdf(u) } }
                                 savePdf.launch("$base.pdf")
                             }
-                            MenuItem("Sayfaları çıkar (böl)") { menu = false; dialog = "extract" }
-                            MenuItem("Sayfaları sil") { menu = false; dialog = "delete" }
+                            Header("Düzenle")
+                            if (doc.undoCount > 0) MenuItem("Geri al") { menu = false; doc.undo() }
+                            if (doc.redoCount > 0) MenuItem("Yinele") { menu = false; doc.redo() }
+                            Header("Sayfalar")
                             MenuItem("Sağa döndür 90°") { menu = false; dialog = "rotR" }
                             MenuItem("Sola döndür 90°") { menu = false; dialog = "rotL" }
                             MenuItem("180° döndür") { menu = false; dialog = "rot180" }
-                            MenuItem("Küçült") { menu = false; dialog = "compress" }
-                            MenuItem("Şifreli kopya kaydet") { menu = false; dialog = "encrypt" }
-                            MenuItem("Metni dışa aktar (.txt)") {
+                            MenuItem("Sayfaları sil") { menu = false; dialog = "delete" }
+                            MenuItem("Sayfaları çıkar") { menu = false; dialog = "extract" }
+                            MenuItem("Boş sayfa ekle") { menu = false; dialog = "blank" }
+                            MenuItem("Sayfayı taşı") { menu = false; dialog = "move" }
+                            MenuItem("Böl (ZIP içinde parçalar)") { menu = false; dialog = "split" }
+                            Header("Yer imleri")
+                            MenuItem("Yer imlerini göster") {
                                 menu = false
-                                pendingWrite = { u -> scope.launch { doc.exportText(u) } }
-                                saveTxt.launch("$base.txt")
+                                scope.launch {
+                                    marks = doc.bookmarks()
+                                    dialog = "marks"
+                                }
                             }
+                            MenuItem("Bu sayfaya yer imi ekle") { menu = false; dialog = "addmark" }
+                            Header("Dışa aktar")
+                            MenuItem("Metin (.txt)") { menu = false; dialog = "exptxt" }
+                            MenuItem("Sayfa aralığı resim (ZIP)") { menu = false; dialog = "exppng" }
                             MenuItem("Bu sayfayı PNG kaydet") {
                                 menu = false
                                 val idx = current
                                 pendingWrite = { u -> scope.launch { doc.exportPng(u, idx) } }
                                 savePng.launch("${base}_sayfa${idx + 1}.png")
                             }
-                            if (doc.undoCount > 0) MenuItem("Geri al") { menu = false; doc.undo() }
-                            MenuItem(if (invert) "Koyu okumayı kapat" else "Koyu okuma") { menu = false; invert = !invert }
+                            Header("Güvenlik")
+                            MenuItem("Şifreli kopya kaydet") { menu = false; dialog = "encrypt" }
+                            Header("Araçlar")
+                            MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
+                            MenuItem("Belge bilgileri") {
+                                menu = false
+                                scope.launch {
+                                    info = doc.info()
+                                    dialog = "info"
+                                }
+                            }
+                            MenuItem("Metadata düzenle") {
+                                menu = false
+                                scope.launch {
+                                    info = doc.info()
+                                    dialog = "meta"
+                                }
+                            }
                         }
+                        Header("Görünüm")
+                        MenuItem("Sayfa rengi: ${MODE_NAMES[pageMode]} (değiştir)") { menu = false; pageMode = (pageMode + 1) % 3 }
+                        MenuItem("E-kitap yazı boyutu") { menu = false; dialog = "bookfont" }
                     }
                 }
             )
@@ -193,6 +258,15 @@ fun App(initialUri: Uri?) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     TextButton(onClick = { zoom = (zoom - 0.25f).coerceAtLeast(1f) }) { Text("−") }
+                    if (hits.isNotEmpty()) {
+                        TextButton(onClick = { stepHit(-1) }) { Text("‹") }
+                        TextButton(onClick = { showHits = true }) { Text("${hitIdx + 1}/${hits.size}") }
+                        TextButton(onClick = { stepHit(1) }) { Text("›") }
+                        TextButton(onClick = {
+                            hits = emptyList()
+                            doc.query = ""
+                        }) { Text("✕") }
+                    }
                     TextButton(onClick = { dialog = "goto" }) { Text("${current + 1} / ${doc.pageCount}") }
                     TextButton(onClick = { zoom = (zoom + 0.25f).coerceAtMost(3f) }) { Text("+") }
                 }
@@ -201,6 +275,7 @@ fun App(initialUri: Uri?) {
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
             if (!hasDoc) {
+                val recents = remember(doc.recentVersion) { Recent.list(ctx) }
                 Column(
                     Modifier.fillMaxSize().padding(24.dp),
                     verticalArrangement = Arrangement.Center,
@@ -212,8 +287,15 @@ fun App(initialUri: Uri?) {
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
                     )
-                    Button(onClick = { openLauncher.launch(arrayOf("application/pdf")) }) { Text("PDF aç") }
-                    TextButton(onClick = { mergeLauncher.launch(arrayOf("application/pdf")) }) { Text("PDF birleştir") }
+                    Button(onClick = { openLauncher.launch(arrayOf("*/*")) }) { Text("Belge aç (PDF / e-kitap)") }
+                    TextButton(onClick = { mergeLauncher.launch(arrayOf("*/*")) }) { Text("Belgeleri birleştir") }
+                    if (recents.isNotEmpty()) {
+                        Text("Son açılanlar", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 24.dp))
+                        recents.take(6).forEach { (nm, u) ->
+                            TextButton(onClick = { scope.launch { doc.open(Uri.parse(u)) } }) { Text(nm, maxLines = 1) }
+                        }
+                        TextButton(onClick = { doc.clearRecent() }) { Text("Listeyi temizle") }
+                    }
                 }
             } else if (renderer != null) {
                 BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF8E8AA3))) {
@@ -226,7 +308,7 @@ fun App(initialUri: Uri?) {
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(count = doc.pageCount, key = { it }) { i ->
-                                PageItem(renderer, i, widthPx, invert)
+                                PageItem(renderer, i, widthPx, pageMode, doc.query)
                             }
                         }
                     }
@@ -237,23 +319,36 @@ fun App(initialUri: Uri?) {
     }
 
     // ---- Diyaloglar ----
-    val total = doc.pageCount
-    val all = "1-$total"
     when (dialog) {
-        "search" -> InputDialog("Belgede ara", "Aranacak metin", "", { q ->
+        "search" -> InputDialog("Belgede ara", "Aranacak metin", doc.query, { q ->
             dialog = null
-            scope.launch { hits = doc.search(q).also { if (it.isEmpty()) doc.message = "Sonuç yok" } }
+            if (q.isNotBlank()) {
+                doc.query = q.trim()
+                scope.launch {
+                    hits = doc.search(q)
+                    hitIdx = 0
+                    if (hits.isEmpty()) doc.message = "Sonuç yok" else showHits = true
+                }
+            }
         }, { dialog = null })
 
         "goto" -> InputDialog("Sayfaya git", "Sayfa numarası (1-$total)", "${current + 1}", { v ->
             dialog = null
             val n = v.trim().toIntOrNull()
             if (n != null && n in 1..total) {
-                scope.launch { listState.scrollToItem(n - 1) }
+                goTo(n)
             } else {
                 doc.message = "Geçersiz sayfa numarası"
             }
         }, { dialog = null }, number = true)
+
+        "overwrite" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Özgün dosya güncellensin mi?") },
+            text = { Text("Yaptığınız değişiklikler açtığınız dosyanın üzerine yazılır. Geri dönüşü için önce Farklı kaydet ile yedek alabilirsiniz.") },
+            confirmButton = { TextButton(onClick = { dialog = null; scope.launch { doc.saveOriginal() } }) { Text("Üzerine yaz") } },
+            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Vazgeç") } }
+        )
 
         "extract" -> InputDialog("Sayfaları çıkar", "Sayfa aralığı (örn. 1-3,5)", all, { v ->
             dialog = null
@@ -273,6 +368,66 @@ fun App(initialUri: Uri?) {
             }, { dialog = null })
         }
 
+        "blank" -> InputDialog("Boş sayfa ekle", "Kaçıncı sayfadan sonra? (0 = en başa)", "${current + 1}", { v ->
+            dialog = null
+            val at = v.trim().toIntOrNull()
+            if (at == null) {
+                doc.message = "Geçersiz sayı"
+            } else {
+                scope.launch { doc.transform("Boş sayfa eklendi") { s, o -> PdfOps.blankPage(s, o, at) } }
+            }
+        }, { dialog = null }, number = true)
+
+        "move" -> MultiInputDialog(
+            "Sayfayı taşı",
+            listOf("Taşınacak sayfa (1-$total)", "Yeni konum (1-$total)"),
+            listOf("${current + 1}", "1"),
+            { v ->
+                dialog = null
+                val a = v[0].trim().toIntOrNull()
+                val b = v[1].trim().toIntOrNull()
+                if (a == null || b == null) {
+                    doc.message = "Geçersiz sayfa numarası"
+                } else {
+                    scope.launch { doc.transform("Sayfa taşındı") { s, o -> PdfOps.movePage(s, o, a - 1, b - 1) } }
+                }
+            },
+            { dialog = null }
+        )
+
+        "split" -> InputDialog("Böl", "Kaç sayfada bir parça oluşsun?", "1", { v ->
+            dialog = null
+            val n = v.trim().toIntOrNull()
+            if (n == null || n < 1) {
+                doc.message = "Geçersiz sayı"
+            } else {
+                pendingWrite = { u -> scope.launch { doc.exportSplitZip(u, n) } }
+                saveZip.launch("${base}_parcalar.zip")
+            }
+        }, { dialog = null }, number = true)
+
+        "exptxt" -> InputDialog("Metni dışa aktar", "Sayfa aralığı", all, { v ->
+            dialog = null
+            try {
+                val pages = PdfOps.parseRange(v, total)
+                pendingWrite = { u -> scope.launch { doc.exportText(u, pages) } }
+                saveTxt.launch("$base.txt")
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
+        }, { dialog = null })
+
+        "exppng" -> InputDialog("Resim olarak dışa aktar", "Sayfa aralığı", "${current + 1}", { v ->
+            dialog = null
+            try {
+                val pages = PdfOps.parseRange(v, total)
+                pendingWrite = { u -> scope.launch { doc.exportPngZip(u, pages) } }
+                saveZip.launch("${base}_resimler.zip")
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
+        }, { dialog = null })
+
         "encrypt" -> InputDialog("Şifreli kopya", "Açma şifresi", "", { pw ->
             dialog = null
             if (pw.isBlank()) {
@@ -283,19 +438,104 @@ fun App(initialUri: Uri?) {
             }
         }, { dialog = null }, password = true)
 
+        "addmark" -> InputDialog("Yer imi ekle", "Başlık (sayfa ${current + 1})", "Sayfa ${current + 1}", { t ->
+            dialog = null
+            val pg = current + 1
+            if (t.isBlank()) {
+                doc.message = "Başlık boş olamaz"
+            } else {
+                scope.launch { doc.transform("Yer imi eklendi") { s, o -> PdfOps.addBookmark(s, o, t.trim(), pg) } }
+            }
+        }, { dialog = null })
+
+        "bookfont" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("E-kitap yazı boyutu") },
+            text = {
+                Column {
+                    Text("Sonraki açılan e-kitaplarda geçerli olur; açık kitabı yeniden açın.")
+                    listOf("Küçük" to 10f, "Orta" to 12f, "Büyük" to 15f, "Çok büyük" to 18f).forEach { (label, em) ->
+                        TextButton(onClick = {
+                            Recent.setBookFontSize(ctx, em)
+                            dialog = null
+                            doc.message = "Yazı boyutu: $label"
+                        }) { Text(label) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
+        )
+
         "compress" -> AlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text("Küçült") },
             text = {
                 Column {
-                    Text("Sayfalar JPEG görüntüye çevrilir; metin seçme ve arama kaybolur. Sonuç büyükse uygulanmaz, Geri al kullanılabilir.")
-                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(150, 0.75f) } }) { Text("Hafif (150 dpi)") }
-                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(110, 0.65f) } }) { Text("Orta (110 dpi)") }
-                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(80, 0.55f) } }) { Text("Güçlü (80 dpi)") }
+                    Text("Önce \"Yapıyı sıkıştır\" deneyin (metin korunur). Taranmış belgeler için resme çevirme daha çok küçültür ama metin seçme ve arama kaybolur. Sonuç büyükse uygulanmaz; Geri al kullanılabilir.")
+                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(false) } }) { Text("Yapıyı sıkıştır (metin korunur)") }
+                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(true, 150, 0.75f) } }) { Text("Resme çevir – hafif (150 dpi)") }
+                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(true, 110, 0.65f) } }) { Text("Resme çevir – orta (110 dpi)") }
+                    TextButton(onClick = { dialog = null; scope.launch { doc.compress(true, 80, 0.55f) } }) { Text("Resme çevir – güçlü (80 dpi)") }
                 }
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { dialog = null }) { Text("Vazgeç") } }
+        )
+
+        "info" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Belge bilgileri") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(info.entries.toList()) { e ->
+                        Column(Modifier.padding(vertical = 4.dp)) {
+                            Text(e.key, style = MaterialTheme.typography.labelMedium)
+                            Text(e.value.ifBlank { "—" }, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
+        )
+
+        "meta" -> MultiInputDialog(
+            "Metadata düzenle",
+            listOf("Başlık", "Yazar", "Konu", "Anahtar sözcükler"),
+            listOf(info["Başlık"] ?: "", info["Yazar"] ?: "", info["Konu"] ?: "", info["Anahtar sözcükler"] ?: ""),
+            { v ->
+                dialog = null
+                val values = mapOf(
+                    "info:Title" to v[0], "info:Author" to v[1], "info:Subject" to v[2], "info:Keywords" to v[3]
+                )
+                scope.launch { doc.transform("Metadata güncellendi") { s, o -> PdfOps.setMetadata(s, o, values) } }
+            },
+            { dialog = null }
+        )
+
+        "marks" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Yer imleri") },
+            text = {
+                if (marks.isEmpty()) {
+                    Text("Bu belgede yer imi yok.")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                        items(marks) { m ->
+                            Text(
+                                m.title.ifBlank { "(adsız)" } + if (m.page >= 0) "  ·  s. ${m.page + 1}" else "",
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable {
+                                        dialog = null
+                                        if (m.page >= 0) goTo(m.page + 1)
+                                    }
+                                    .padding(start = (m.level * 16).dp, top = 8.dp, bottom = 8.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
         )
     }
 
@@ -305,17 +545,19 @@ fun App(initialUri: Uri?) {
         }, { doc.cancelPassword() }, password = true)
     }
 
-    hits?.let { list ->
+    if (showHits && hits.isNotEmpty()) {
         AlertDialog(
-            onDismissRequest = { hits = null },
-            title = { Text("${list.size} sonuç") },
+            onDismissRequest = { showHits = false },
+            title = { Text("${hits.size} sonuç") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                    items(list) { h ->
+                    items(hits.size) { i ->
+                        val h = hits[i]
                         Column(
                             Modifier.fillMaxWidth().clickable {
-                                hits = null
-                                scope.launch { listState.scrollToItem(h.page - 1) }
+                                showHits = false
+                                hitIdx = i
+                                goTo(h.page)
                             }.padding(vertical = 8.dp)
                         ) {
                             Text("Sayfa ${h.page}", style = MaterialTheme.typography.labelMedium)
@@ -324,9 +566,18 @@ fun App(initialUri: Uri?) {
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { hits = null }) { Text("Kapat") } }
+            confirmButton = { TextButton(onClick = { showHits = false }) { Text("Kapat") } }
         )
     }
+}
+
+@Composable
+private fun Header(text: String) {
+    DropdownMenuItem(
+        text = { Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) },
+        onClick = {},
+        enabled = false
+    )
 }
 
 @Composable
@@ -335,10 +586,10 @@ private fun MenuItem(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PageItem(renderer: PageRenderer, index: Int, widthPx: Int, invert: Boolean) {
-    val bmp by produceState<android.graphics.Bitmap?>(null, renderer, index, widthPx) {
+private fun PageItem(renderer: PageRenderer, index: Int, widthPx: Int, mode: Int, query: String) {
+    val bmp by produceState<android.graphics.Bitmap?>(null, renderer, index, widthPx, query) {
         value = try {
-            renderer.render(index, widthPx)
+            renderer.render(index, widthPx, query)
         } catch (e: Exception) {
             null
         }
@@ -349,7 +600,11 @@ private fun PageItem(renderer: PageRenderer, index: Int, widthPx: Int, invert: B
             bitmap = b.asImageBitmap(),
             contentDescription = "Sayfa ${index + 1}",
             modifier = Modifier.fillMaxWidth().aspectRatio(b.width.toFloat() / b.height),
-            colorFilter = if (invert) ColorFilter.colorMatrix(INVERT) else null
+            colorFilter = when (mode) {
+                1 -> ColorFilter.colorMatrix(INVERT)
+                2 -> ColorFilter.colorMatrix(SEPIA)
+                else -> null
+            }
         )
     } else {
         Box(
@@ -379,7 +634,7 @@ private fun InputDialog(
                 onValueChange = { text = it },
                 label = { Text(label) },
                 singleLine = true,
-                visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+                visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = when {
                         password -> KeyboardType.Password
@@ -390,6 +645,38 @@ private fun InputDialog(
             )
         },
         confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("Tamam") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Vazgeç") } }
+    )
+}
+
+@Composable
+private fun MultiInputDialog(
+    title: String,
+    labels: List<String>,
+    initials: List<String>,
+    onConfirm: (List<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val texts = remember { mutableStateOf(initials) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                labels.forEachIndexed { i, l ->
+                    OutlinedTextField(
+                        value = texts.value[i],
+                        onValueChange = { v ->
+                            texts.value = texts.value.toMutableList().also { it[i] = v }
+                        },
+                        label = { Text(l) },
+                        singleLine = true,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(texts.value) }) { Text("Tamam") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Vazgeç") } }
     )
 }

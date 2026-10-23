@@ -2,23 +2,26 @@ package tr.baba.pdf
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.LruCache
-import com.tom_roush.pdfbox.io.MemoryUsageSetting
-import com.tom_roush.pdfbox.multipdf.PDFMergerUtility
+import com.artifex.mupdf.fitz.Document
+import com.artifex.mupdf.fitz.DocumentWriter
+import com.artifex.mupdf.fitz.Matrix
+import com.artifex.mupdf.fitz.Outline
+import com.artifex.mupdf.fitz.PDFDocument
+import com.artifex.mupdf.fitz.Rect
+import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
-import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
-import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
-import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
-import com.tom_roush.pdfbox.text.PDFTextStripper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,14 +31,20 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.util.Locale
-import java.util.UUID
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class PasswordNeeded : Exception()
 
 object PdfOps {
 
     data class Hit(val page: Int, val snippet: String)
+    data class Mark(val title: String, val page: Int, val level: Int)
+    data class BookCfg(val w: Float, val h: Float, val em: Float)
+
+    private const val SAVE = "garbage=compact,compress=yes"
 
     fun copyUri(ctx: Context, uri: Uri, dest: File) {
         val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("Dosya açılamadı")
@@ -53,26 +62,64 @@ object PdfOps {
         return n ?: (uri.lastPathSegment ?: "belge.pdf")
     }
 
-    /** Şifresiz çalışma kopyası üretir. Şifre gerekiyorsa [PasswordNeeded] fırlatır. */
-    fun openDecrypted(src: File, password: String?, out: File) {
-        val doc = try {
-            PDDocument.load(src, password ?: "", MemoryUsageSetting.setupTempFileOnly())
-        } catch (e: InvalidPasswordException) {
-            throw PasswordNeeded()
-        }
-        doc.use {
-            if (it.isEncrypted) {
-                it.isAllSecurityToBeRemoved = true
-                it.save(out)
-            } else {
-                src.copyTo(out, overwrite = true)
+    /**
+     * Çalışma kopyası üretir: şifre çözülür, e-kitaplar sayfalı PDF'e çevrilir.
+     * Şifre gerekiyorsa [PasswordNeeded] fırlatır. [src] uzantısı biçimi belirler.
+     */
+    fun openNormalized(src: File, password: String?, out: File, cfg: BookCfg) {
+        val d = Document.openDocument(src.path)
+        try {
+            if (d.needsPassword()) {
+                if (password == null || !d.authenticatePassword(password)) throw PasswordNeeded()
             }
+            if (d.isPDF()) {
+                if (d.isUnencryptedPDF()) {
+                    src.copyTo(out, overwrite = true)
+                } else {
+                    d.asPDF().save(out.path, "decrypt=yes")
+                }
+            } else {
+                d.layout(cfg.w, cfg.h, cfg.em)
+                val writer = DocumentWriter(out.path, "pdf", "")
+                try {
+                    val n = d.countPages()
+                    for (i in 0 until n) {
+                        val p = d.loadPage(i)
+                        try {
+                            val dev = writer.beginPage(p.getBounds())
+                            p.run(dev, Matrix.Identity(), null)
+                            dev.close()
+                            writer.endPage()
+                        } finally {
+                            p.destroy()
+                        }
+                    }
+                    writer.close()
+                } finally {
+                    writer.destroy()
+                }
+            }
+        } finally {
+            d.destroy()
         }
     }
 
     fun pageCount(file: File): Int {
-        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        return PdfRenderer(pfd).use { it.pageCount }.also { pfd.close() }
+        val d = Document.openDocument(file.path)
+        try {
+            return d.countPages()
+        } finally {
+            d.destroy()
+        }
+    }
+
+    private inline fun <T> withPdf(src: File, block: (PDFDocument) -> T): T {
+        val d = Document.openDocument(src.path)
+        try {
+            return block(d.asPDF())
+        } finally {
+            d.destroy()
+        }
     }
 
     private fun toPage(s: String, part: String): Int =
@@ -104,39 +151,98 @@ object PdfOps {
 
     /** Yalnızca [keep] içindeki sayfaları tutar. */
     fun keep(src: File, out: File, keep: Set<Int>) {
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
-            for (i in doc.numberOfPages - 1 downTo 0) if (i !in keep) doc.removePage(i)
-            doc.save(out)
+        withPdf(src) { pdf ->
+            for (i in pdf.countPages() - 1 downTo 0) if (i !in keep) pdf.deletePage(i)
+            pdf.save(out.path, SAVE)
         }
     }
 
     fun delete(src: File, out: File, remove: Set<Int>) {
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
-            if (remove.size >= doc.numberOfPages) throw IllegalArgumentException("Tüm sayfalar silinemez")
-            for (i in doc.numberOfPages - 1 downTo 0) if (i in remove) doc.removePage(i)
-            doc.save(out)
+        withPdf(src) { pdf ->
+            if (remove.size >= pdf.countPages()) throw IllegalArgumentException("Tüm sayfalar silinemez")
+            for (i in pdf.countPages() - 1 downTo 0) if (i in remove) pdf.deletePage(i)
+            pdf.save(out.path, SAVE)
         }
     }
 
     fun rotate(src: File, out: File, pages: Set<Int>, degrees: Int) {
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
+        withPdf(src) { pdf ->
             for (i in pages) {
-                val p = doc.getPage(i)
-                p.rotation = ((p.rotation + degrees) % 360 + 360) % 360
+                val po = pdf.findPage(i)
+                var cur = 0
+                var o = po
+                var guard = 0
+                while (o != null && !o.isNull() && guard < 32) {
+                    val r = o.get("Rotate")
+                    if (r != null && r.isNumber()) {
+                        cur = r.asInteger()
+                        break
+                    }
+                    o = o.get("Parent")
+                    guard++
+                }
+                po.put("Rotate", ((cur + degrees) % 360 + 360) % 360)
             }
-            doc.save(out)
+            pdf.save(out.path, SAVE)
+        }
+    }
+
+    /** [at] konumuna (0 tabanlı) boş sayfa ekler; boyut komşu sayfadan alınır. */
+    fun blankPage(src: File, out: File, at: Int) {
+        withPdf(src) { pdf ->
+            val n = pdf.countPages()
+            if (at < 0 || at > n) throw IllegalArgumentException("Konum 0-$n içinde olmalı")
+            val ref = pdf.loadPage(if (at > 0) at - 1 else 0)
+            val box = Rect(ref.getBounds())
+            ref.destroy()
+            val page = pdf.addPage(box, 0, pdf.newDictionary(), "")
+            pdf.insertPage(at, page)
+            pdf.save(out.path, SAVE)
+        }
+    }
+
+    /** [from] sayfasını [to] konumuna taşır (ikisi de 0 tabanlı). */
+    fun movePage(src: File, out: File, from: Int, to: Int) {
+        withPdf(src) { pdf ->
+            val n = pdf.countPages()
+            if (from < 0 || from >= n || to < 0 || to >= n) throw IllegalArgumentException("Sayfa numarası 1-$n içinde olmalı")
+            val order = (0 until n).toMutableList()
+            val x = order.removeAt(from)
+            order.add(to, x)
+            pdf.rearrangePages(order.toIntArray())
+            pdf.save(out.path, SAVE)
         }
     }
 
     fun merge(files: List<File>, out: File) {
-        val m = PDFMergerUtility()
-        m.destinationFileName = out.path
-        files.forEach { m.addSource(it) }
-        m.mergeDocuments(MemoryUsageSetting.setupTempFileOnly())
+        val dst = Document.openDocument(files[0].path)
+        try {
+            val pdf = dst.asPDF()
+            for (k in 1 until files.size) {
+                val s = Document.openDocument(files[k].path)
+                try {
+                    val sp = s.asPDF()
+                    val cnt = s.countPages()
+                    for (i in 0 until cnt) pdf.graftPage(pdf.countPages(), sp, i)
+                } finally {
+                    s.destroy()
+                }
+            }
+            pdf.save(out.path, SAVE)
+        } finally {
+            dst.destroy()
+        }
+    }
+
+    /** Yapıyı sıkıştırır; metin ve vektörler korunur. */
+    fun compressStructure(src: File, out: File) {
+        withPdf(src) { pdf ->
+            pdf.save(out.path, "garbage=4,compress=yes,compress-images=yes,compress-fonts=yes")
+        }
     }
 
     /** Sayfaları JPEG görüntüye çevirerek küçültür (metin seçilebilirliği kaybolur). */
-    fun compress(src: File, out: File, dpi: Int, quality: Float) {
+    fun compressRaster(src: File, out: File, dpi: Int, quality: Float) {
         val pfd = ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY)
         try {
             PdfRenderer(pfd).use { r ->
@@ -171,94 +277,250 @@ object PdfOps {
     }
 
     fun encrypt(src: File, out: File, userPassword: String) {
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
-            val policy = StandardProtectionPolicy(UUID.randomUUID().toString(), userPassword, AccessPermission())
-            policy.encryptionKeyLength = 128
-            doc.protect(policy)
-            doc.save(out)
+        if (userPassword.contains(',') || userPassword.contains('=')) {
+            throw IllegalArgumentException("Şifre ',' veya '=' içeremez")
+        }
+        val owner = java.util.UUID.randomUUID().toString()
+        withPdf(src) { pdf ->
+            pdf.save(out.path, "garbage=compact,compress=yes,encrypt=aes-256,user-password=$userPassword,owner-password=$owner")
         }
     }
 
-    fun extractText(src: File): String =
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { PDFTextStripper().getText(it) }
+    fun metadata(src: File): Map<String, String> {
+        val d = Document.openDocument(src.path)
+        try {
+            val keys = linkedMapOf(
+                "Başlık" to Document.META_INFO_TITLE,
+                "Yazar" to Document.META_INFO_AUTHOR,
+                "Konu" to Document.META_INFO_SUBJECT,
+                "Anahtar sözcükler" to Document.META_INFO_KEYWORDS,
+                "Oluşturan program" to Document.META_INFO_CREATOR,
+                "PDF üretici" to Document.META_INFO_PRODUCER,
+                "Oluşturma tarihi" to Document.META_INFO_CREATIONDATE,
+                "Değiştirme tarihi" to Document.META_INFO_MODIFICATIONDATE,
+                "Biçim" to Document.META_FORMAT,
+                "Şifreleme" to Document.META_ENCRYPTION
+            )
+            val result = linkedMapOf<String, String>()
+            for ((label, key) in keys) result[label] = d.getMetaData(key) ?: ""
+            result["Sayfa sayısı"] = d.countPages().toString()
+            return result
+        } finally {
+            d.destroy()
+        }
+    }
+
+    fun setMetadata(src: File, out: File, values: Map<String, String>) {
+        withPdf(src) { pdf ->
+            for ((k, v) in values) pdf.setMetaData(k, v)
+            pdf.save(out.path, SAVE)
+        }
+    }
+
+    fun bookmarks(f: File): List<Mark> {
+        val d = Document.openDocument(f.path)
+        try {
+            val top = d.loadOutline() ?: return emptyList()
+            val res = mutableListOf<Mark>()
+            fun walk(arr: Array<Outline>, level: Int) {
+                for (x in arr) {
+                    val pg = try {
+                        d.pageNumberFromLocation(d.resolveLink(x))
+                    } catch (e: Exception) {
+                        -1
+                    }
+                    res.add(Mark(x.title ?: "", pg, level))
+                    val kids = x.down
+                    if (kids != null) walk(kids, level + 1)
+                }
+            }
+            walk(top, 0)
+            return res
+        } finally {
+            d.destroy()
+        }
+    }
+
+    /** [page] (1 tabanlı) sayfasına yeni üst düzey yer imi ekler. */
+    fun addBookmark(src: File, out: File, title: String, page: Int) {
+        withPdf(src) { pdf ->
+            val oi = pdf.outlineIterator()
+            try {
+                while (oi.next() == 0) {
+                    // son üst düzey öğeye ilerle
+                }
+                oi.insert(title, "#page=$page", false)
+            } finally {
+                oi.destroy()
+            }
+            pdf.save(out.path, SAVE)
+        }
+    }
+
+    fun extractText(src: File, pages: Set<Int>?): String {
+        val d = Document.openDocument(src.path)
+        try {
+            val sb = StringBuilder()
+            val n = d.countPages()
+            for (i in 0 until n) {
+                if (pages != null && i !in pages) continue
+                val p = d.loadPage(i)
+                try {
+                    val st = p.toStructuredText()
+                    sb.append(st.asText()).append("\n\n")
+                    st.destroy()
+                } finally {
+                    p.destroy()
+                }
+            }
+            return sb.toString()
+        } finally {
+            d.destroy()
+        }
+    }
 
     fun search(src: File, query: String, limit: Int = 200): List<Hit> {
         val tr = Locale.forLanguageTag("tr")
         val q = query.trim().lowercase(tr)
         if (q.isEmpty()) return emptyList()
         val hits = mutableListOf<Hit>()
-        PDDocument.load(src, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
-            val st = PDFTextStripper()
-            for (i in 1..doc.numberOfPages) {
+        val d = Document.openDocument(src.path)
+        try {
+            val n = d.countPages()
+            for (i in 0 until n) {
                 if (hits.size >= limit) break
-                st.startPage = i
-                st.endPage = i
-                val text = st.getText(doc).replace('\n', ' ').replace('\r', ' ')
-                val low = text.lowercase(tr)
-                var from = 0
-                var perPage = 0
-                while (perPage < 3 && hits.size < limit) {
-                    val idx = low.indexOf(q, from)
-                    if (idx < 0) break
-                    val s = (idx - 30).coerceAtLeast(0)
-                    val e = (idx + q.length + 50).coerceAtMost(text.length)
-                    hits.add(Hit(i, text.substring(s, e).trim()))
-                    perPage++
-                    from = idx + q.length
+                val p = d.loadPage(i)
+                try {
+                    val st = p.toStructuredText()
+                    val text = st.asText().replace('\n', ' ').replace('\r', ' ')
+                    st.destroy()
+                    val low = text.lowercase(tr)
+                    var from = 0
+                    var perPage = 0
+                    while (perPage < 3 && hits.size < limit) {
+                        val idx = low.indexOf(q, from)
+                        if (idx < 0) break
+                        val s = (idx - 30).coerceAtLeast(0)
+                        val e = (idx + q.length + 50).coerceAtMost(text.length)
+                        hits.add(Hit(i + 1, text.substring(s, e).trim()))
+                        perPage++
+                        from = idx + q.length
+                    }
+                } finally {
+                    p.destroy()
                 }
             }
+        } finally {
+            d.destroy()
         }
         return hits
     }
 
-    fun renderPagePng(src: File, index: Int, dpi: Int = 150): Bitmap {
-        val pfd = ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY)
+    fun renderPng(src: File, index: Int, dpi: Float = 150f): Bitmap {
+        val d = Document.openDocument(src.path)
         try {
-            return PdfRenderer(pfd).use { r ->
-                r.openPage(index).use { p ->
-                    val scale = dpi / 72f
-                    val bmp = Bitmap.createBitmap(
-                        (p.width * scale).toInt().coerceAtLeast(1),
-                        (p.height * scale).toInt().coerceAtLeast(1),
-                        Bitmap.Config.ARGB_8888
-                    )
-                    bmp.eraseColor(Color.WHITE)
-                    p.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
-                    bmp
+            val p = d.loadPage(index)
+            try {
+                return AndroidDrawDevice.drawPage(p, dpi)
+            } finally {
+                p.destroy()
+            }
+        } finally {
+            d.destroy()
+        }
+    }
+
+    fun exportPngZip(src: File, pages: Set<Int>, os: OutputStream) {
+        val z = ZipOutputStream(os)
+        val d = Document.openDocument(src.path)
+        try {
+            for (i in pages) {
+                val p = d.loadPage(i)
+                try {
+                    val bmp = AndroidDrawDevice.drawPage(p, 150f)
+                    z.putNextEntry(ZipEntry("sayfa_%03d.png".format(i + 1)))
+                    bmp.compress(Bitmap.CompressFormat.PNG, 100, z)
+                    z.closeEntry()
+                    bmp.recycle()
+                } finally {
+                    p.destroy()
                 }
             }
         } finally {
-            pfd.close()
+            d.destroy()
         }
+        z.finish()
+        z.flush()
+    }
+
+    /** Belgeyi her [each] sayfada bir parça olacak şekilde bölüp ZIP içine yazar. */
+    fun splitZip(src: File, each: Int, tmpDir: File, os: OutputStream) {
+        val total = pageCount(src)
+        val z = ZipOutputStream(os)
+        var start = 0
+        var part = 1
+        while (start < total) {
+            val end = minOf(start + each, total)
+            val tmp = File(tmpDir, "part${System.nanoTime()}.pdf")
+            try {
+                keep(src, tmp, (start until end).toSet())
+                z.putNextEntry(ZipEntry("parca_%02d_sayfa_%d-%d.pdf".format(part, start + 1, end)))
+                tmp.inputStream().use { it.copyTo(z) }
+                z.closeEntry()
+            } finally {
+                tmp.delete()
+            }
+            start = end
+            part++
+        }
+        z.finish()
+        z.flush()
     }
 }
 
-/** Ekranda sayfa çizer. PdfRenderer aynı anda tek sayfa açabildiği için işlemler kilitlidir. */
+/** Ekranda sayfa çizer. MuPDF belgesi tek iş parçacığından kullanıldığı için işlemler kilitlidir. */
 class PageRenderer(file: File) {
-    private val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-    private val renderer = PdfRenderer(pfd)
+    private val doc: Document = Document.openDocument(file.path)
     private val lock = Mutex()
     private var closed = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val cache = object : LruCache<String, Bitmap>(48 * 1024 * 1024) {
+    private val cache = object : LruCache<String, Bitmap>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
-    val pageCount: Int = renderer.pageCount
+    val pageCount: Int = doc.countPages()
 
-    suspend fun render(index: Int, widthPx: Int): Bitmap? {
-        val key = "$index:$widthPx"
+    suspend fun render(index: Int, widthPx: Int, query: String): Bitmap? {
+        val key = "$index:$widthPx:$query"
         cache.get(key)?.let { return it }
         return lock.withLock {
             if (closed) return@withLock null
             withContext(Dispatchers.Default) {
-                renderer.openPage(index).use { p ->
-                    val h = (widthPx.toFloat() * p.height / p.width).toInt().coerceAtLeast(1)
-                    val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
-                    bmp.eraseColor(Color.WHITE)
-                    p.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                val page = doc.loadPage(index)
+                try {
+                    val ctm = AndroidDrawDevice.fitPageWidth(page, widthPx)
+                    val bmp = AndroidDrawDevice.drawPage(page, ctm)
+                    if (query.isNotEmpty()) {
+                        val hits = page.search(query)
+                        if (hits != null) {
+                            val origin = Rect(page.getBounds()).transform(ctm)
+                            val ox = Math.floor(origin.x0.toDouble()).toFloat()
+                            val oy = Math.floor(origin.y0.toDouble()).toFloat()
+                            val canvas = Canvas(bmp)
+                            val paint = Paint()
+                            paint.color = Color.argb(100, 255, 200, 0)
+                            for (hit in hits) {
+                                for (q in hit) {
+                                    val r = Rect(q).transform(ctm)
+                                    canvas.drawRect(r.x0 - ox, r.y0 - oy, r.x1 - ox, r.y1 - oy, paint)
+                                }
+                            }
+                        }
+                    }
                     cache.put(key, bmp)
                     bmp
+                } finally {
+                    page.destroy()
                 }
             }
         }
@@ -270,8 +532,7 @@ class PageRenderer(file: File) {
                 if (!closed) {
                     closed = true
                     try {
-                        renderer.close()
-                        pfd.close()
+                        doc.destroy()
                     } catch (_: Exception) {
                     }
                 }
