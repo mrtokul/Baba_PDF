@@ -31,6 +31,18 @@ import java.io.ByteArrayInputStream
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
+/** FitzInputStream sonda -1 yerine 0 döndürebildiğinden elle okunur. */
+internal fun readAll(s: FitzInputStream): ByteArray {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(16384)
+    while (true) {
+        val n = s.read(buf, 0, buf.size)
+        if (n <= 0) break
+        out.write(buf, 0, n)
+    }
+    return out.toByteArray()
+}
+
 /** PKCS#12 (.p12/.pfx) dosyasından imzalayan MuPDF imzalayıcısı. */
 class P12Signer(p12: File, password: String) : PKCS7Signer() {
     private val bc = BouncyCastleProvider()
@@ -67,7 +79,7 @@ class P12Signer(p12: File, password: String) : PKCS7Signer() {
     }
 
     override fun sign(stm: FitzInputStream): ByteArray {
-        val data = stm.readBytes()
+        val data = readAll(stm)
         val alg = if (key.algorithm.equals("EC", true) || key.algorithm.equals("ECDSA", true)) "SHA256withECDSA" else "SHA256withRSA"
         val cs = JcaContentSignerBuilder(alg).setProvider(bc).build(key)
         val dp = JcaDigestCalculatorProviderBuilder().setProvider(bc).build()
@@ -90,7 +102,7 @@ class BcVerifier : PKCS7Verifier() {
 
     override fun checkDigest(stream: FitzInputStream, signature: ByteArray): Int {
         return try {
-            val data = stream.readBytes()
+            val data = readAll(stream)
             val sd = CMSSignedData(CMSProcessableByteArray(data), signature)
             val certs = sd.certificates
             var any = false

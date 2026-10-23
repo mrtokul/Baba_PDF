@@ -46,7 +46,7 @@ object Ocr {
             val b = p.bounds
             val longSide = maxOf(b.x1 - b.x0, b.y1 - b.y0) * s
             if (longSide > 4200f) s *= 4200f / longSide
-            return Pair(AndroidDrawDevice.drawPage(p, s / 1f * 1f), s)
+            return Pair(AndroidDrawDevice.drawPage(p, s * 72f), s)
         } finally {
             p.destroy()
         }
