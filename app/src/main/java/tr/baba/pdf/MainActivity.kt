@@ -71,13 +71,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        PDFBoxResourceLoader.init(applicationContext)
         val initial: Uri? = intent?.data
         setContent {
             val scheme = if (isSystemInDarkTheme()) {

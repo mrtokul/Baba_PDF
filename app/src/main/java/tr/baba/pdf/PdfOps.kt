@@ -5,9 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.LruCache
 import com.artifex.mupdf.fitz.Document
@@ -17,11 +15,6 @@ import com.artifex.mupdf.fitz.Outline
 import com.artifex.mupdf.fitz.PDFDocument
 import com.artifex.mupdf.fitz.Rect
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.pdmodel.PDPage
-import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
-import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
-import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -243,36 +236,34 @@ object PdfOps {
 
     /** Sayfaları JPEG görüntüye çevirerek küçültür (metin seçilebilirliği kaybolur). */
     fun compressRaster(src: File, out: File, dpi: Int, quality: Float) {
-        val pfd = ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY)
+        val d = Document.openDocument(src.path)
         try {
-            PdfRenderer(pfd).use { r ->
-                PDDocument().use { doc ->
-                    val scale = dpi / 72f
-                    for (i in 0 until r.pageCount) {
-                        r.openPage(i).use { p ->
-                            val w = p.width
-                            val h = p.height
-                            val bmp = Bitmap.createBitmap(
-                                (w * scale).toInt().coerceAtLeast(1),
-                                (h * scale).toInt().coerceAtLeast(1),
-                                Bitmap.Config.ARGB_8888
-                            )
-                            bmp.eraseColor(Color.WHITE)
-                            p.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
-                            val page = PDPage(PDRectangle(w.toFloat(), h.toFloat()))
-                            doc.addPage(page)
-                            val img = JPEGFactory.createFromImage(doc, bmp, quality)
-                            PDPageContentStream(doc, page).use { cs ->
-                                cs.drawImage(img, 0f, 0f, w.toFloat(), h.toFloat())
-                            }
-                            bmp.recycle()
-                        }
-                    }
-                    doc.save(out)
-                }
+            val dst = PDFDocument()
+            val n = d.countPages()
+            for (i in 0 until n) {
+                val p = d.loadPage(i)
+                val b = Rect(p.getBounds())
+                val w = b.x1 - b.x0
+                val h = b.y1 - b.y0
+                val bmp = AndroidDrawDevice.drawPage(p, dpi.toFloat())
+                p.destroy()
+                val bos = java.io.ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, (quality * 100).toInt().coerceIn(10, 95), bos)
+                bmp.recycle()
+                val img = dst.addImage(com.artifex.mupdf.fitz.Image(bos.toByteArray()))
+                val res = dst.newDictionary()
+                val xo = dst.newDictionary()
+                xo.put("Im0", img)
+                res.put("XObject", xo)
+                val ws = String.format(Locale.US, "%.2f", w)
+                val hs = String.format(Locale.US, "%.2f", h)
+                val pg = dst.addPage(Rect(0f, 0f, w, h), 0, res, "q $ws 0 0 $hs 0 0 cm /Im0 Do Q")
+                dst.insertPage(-1, pg)
             }
+            dst.save(out.path, SAVE)
+            dst.destroy()
         } finally {
-            pfd.close()
+            d.destroy()
         }
     }
 
