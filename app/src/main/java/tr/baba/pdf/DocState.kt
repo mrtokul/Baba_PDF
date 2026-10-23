@@ -363,4 +363,78 @@ class DocState(private val app: Context) {
             }
         }
     }
+
+    /** Sonuç değeri olan, geri alınabilir işlem. */
+    suspend fun <R> transformWith(okMessage: (R) -> String, block: (src: File, out: File) -> R) = guarded {
+        val src = file ?: return@guarded
+        val out = newFile()
+        try {
+            val r = withContext(Dispatchers.IO) { block(src, out) }
+            swapIn(out, okMessage(r))
+        } catch (e: Exception) {
+            out.delete()
+            throw e
+        }
+    }
+
+    suspend fun readBytes(uri: Uri): ByteArray = withContext(Dispatchers.IO) {
+        val input = app.contentResolver.openInputStream(uri) ?: throw IOException("Dosya açılamadı")
+        input.use { it.readBytes() }
+    }
+
+    /** Seçilen belgeyle açık belgeyi karşılaştırır; rapor metnini döndürür. */
+    suspend fun compareWith(uri: Uri): String {
+        val a = file ?: return ""
+        busy = true
+        val nm = withContext(Dispatchers.IO) { PdfOps.displayName(app, uri) }
+        val ext = nm.substringAfterLast('.', "pdf").lowercase().filter { it.isLetterOrDigit() }.ifEmpty { "pdf" }
+        val t = newFile(ext)
+        val d = newFile()
+        return try {
+            withContext(Dispatchers.IO) {
+                PdfOps.copyUri(app, uri, t)
+                try {
+                    PdfOps.openNormalized(t, null, d, bookCfg())
+                } catch (e: PasswordNeeded) {
+                    throw IOException("Şifreli belge karşılaştırılamaz")
+                }
+                "Seçilen: $nm\n" + PdfOps2.compare(a, d)
+            }
+        } catch (e: Exception) {
+            "Hata: ${e.message ?: e.javaClass.simpleName}"
+        } finally {
+            t.delete()
+            d.delete()
+            busy = false
+        }
+    }
+
+    suspend fun check(): String {
+        val src = file ?: return ""
+        busy = true
+        return try {
+            withContext(Dispatchers.IO) { PdfOps2.check(src) }
+        } catch (e: Exception) {
+            "Hata: ${e.message ?: e.javaClass.simpleName}"
+        } finally {
+            busy = false
+        }
+    }
+
+    suspend fun attachments(): List<PdfOps2.Att> {
+        val src = file ?: return emptyList()
+        return withContext(Dispatchers.IO) {
+            try {
+                PdfOps2.attachments(src)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+    }
+
+    suspend fun exportAttachment(uri: Uri, index: Int) = guarded {
+        val src = file ?: return@guarded
+        withContext(Dispatchers.IO) { write(uri) { o -> PdfOps2.exportAttachment(src, index, o) } }
+        message = "Ek kaydedildi"
+    }
 }

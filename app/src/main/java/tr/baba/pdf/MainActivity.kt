@@ -27,9 +27,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -127,6 +129,9 @@ fun App(initialUri: Uri?) {
     var marks by remember { mutableStateOf<List<PdfOps.Mark>>(emptyList()) }
     var info by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var pendingWrite by remember { mutableStateOf<((Uri) -> Unit)?>(null) }
+    var report by remember { mutableStateOf("") }
+    var atts by remember { mutableStateOf<List<PdfOps2.Att>>(emptyList()) }
+    var pickedImage by remember { mutableStateOf<ByteArray?>(null) }
 
     val current by remember { derivedStateOf { listState.firstVisibleItemIndex } }
 
@@ -147,6 +152,25 @@ fun App(initialUri: Uri?) {
     }
     val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) pendingWrite?.invoke(uri)
+    }
+    val saveAny = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) pendingWrite?.invoke(uri)
+    }
+    val compareLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            report = doc.compareWith(uri)
+            dialog = "report"
+        }
+    }
+    val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                pickedImage = doc.readBytes(uri)
+                dialog = "placeimg"
+            } catch (e: Exception) {
+                doc.message = "Resim okunamadı"
+            }
+        }
     }
 
     LaunchedEffect(Unit) { initialUri?.let { doc.open(it) } }
@@ -215,6 +239,23 @@ fun App(initialUri: Uri?) {
                                 }
                             }
                             MenuItem("Bu sayfaya yer imi ekle") { menu = false; dialog = "addmark" }
+                            Header("Açıklamalar")
+                            MenuItem("Metni vurgula / altını çiz / üstünü çiz") { menu = false; dialog = "mark" }
+                            MenuItem("Bu sayfaya not ekle") { menu = false; dialog = "note" }
+                            MenuItem("Açıklamaları sil") {
+                                menu = false
+                                scope.launch {
+                                    doc.transformWith<Int>({ n -> "$n açıklama silindi" }) { s, o -> PdfOps2.deleteAnnotations(s, o) }
+                                }
+                            }
+                            MenuItem("Açıklamaları sayfaya işle (düzleştir)") {
+                                menu = false
+                                scope.launch { doc.transform("Açıklamalar sayfaya işlendi") { s, o -> PdfOps2.flatten(s, o) } }
+                            }
+                            Header("Filigran, damga, bindirme")
+                            MenuItem("Filigran / metin damgası") { menu = false; dialog = "stamp" }
+                            MenuItem("Üst-alt bilgi ve sayfa numarası") { menu = false; dialog = "header" }
+                            MenuItem("Görsel / imza resmi yerleştir") { menu = false; imageLauncher.launch(arrayOf("image/*")) }
                             Header("Dışa aktar")
                             MenuItem("Metin (.txt)") { menu = false; dialog = "exptxt" }
                             MenuItem("Sayfa aralığı resim (ZIP)") { menu = false; dialog = "exppng" }
@@ -226,8 +267,41 @@ fun App(initialUri: Uri?) {
                             }
                             Header("Güvenlik")
                             MenuItem("Şifreli kopya kaydet") { menu = false; dialog = "encrypt" }
+                            MenuItem("İzinleri değiştirerek kopya kaydet") { menu = false; dialog = "perm" }
+                            MenuItem("Metni kalıcı karart (redaction)") { menu = false; dialog = "redact" }
+                            MenuItem("Gizli veri ve belge bilgilerini temizle") {
+                                menu = false
+                                scope.launch { doc.transform("Gizli veriler temizlendi") { s, o -> PdfOps2.sanitize(s, o) } }
+                            }
                             Header("Araçlar")
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
+                            MenuItem("Boş sayfaları sil") {
+                                menu = false
+                                scope.launch {
+                                    doc.transformWith<Int>({ n -> if (n == 0) "Boş sayfa bulunamadı" else "$n boş sayfa silindi" }) { s, o ->
+                                        PdfOps2.removeBlankPages(s, o)
+                                    }
+                                }
+                            }
+                            MenuItem("Sağlık denetimi") {
+                                menu = false
+                                scope.launch {
+                                    report = doc.check()
+                                    dialog = "report"
+                                }
+                            }
+                            MenuItem("Bozuk dosyayı onar (yeniden yaz)") {
+                                menu = false
+                                scope.launch { doc.transform("Dosya yeniden yazıldı") { s, o -> PdfOps2.repair(s, o) } }
+                            }
+                            MenuItem("İki PDF'i karşılaştır") { menu = false; compareLauncher.launch(arrayOf("*/*")) }
+                            MenuItem("Gömülü ekler") {
+                                menu = false
+                                scope.launch {
+                                    atts = doc.attachments()
+                                    dialog = "atts"
+                                }
+                            }
                             MenuItem("Belge bilgileri") {
                                 menu = false
                                 scope.launch {
@@ -315,6 +389,28 @@ fun App(initialUri: Uri?) {
                 }
             }
             if (doc.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+    }
+
+    val doStamp: (List<String>) -> Unit = { v ->
+        val size = v[1].trim().toFloatOrNull()
+        val anchor = v[2].trim().toIntOrNull()
+        val angle = v[3].trim().toFloatOrNull()
+        val op = v[4].trim().toFloatOrNull()
+        if (v[0].isBlank() || size == null || anchor == null || angle == null || op == null) {
+            doc.message = "Değerleri kontrol edin"
+        } else {
+            try {
+                val pages = PdfOps.parseRange(v[6], total)
+                val color = PdfOps2.parseColor(v[5])
+                scope.launch {
+                    doc.transform("Eklendi") { s, o ->
+                        PdfOps2.stampText(s, o, pages, v[0], size, color, anchor, angle, (op / 100f).coerceIn(0.05f, 1f))
+                    }
+                }
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
         }
     }
 
@@ -448,6 +544,161 @@ fun App(initialUri: Uri?) {
             }
         }, { dialog = null })
 
+        "mark" -> MultiInputDialog(
+            "Metni işaretle",
+            listOf("Aranacak metin", "Tür (1 vurgu, 2 altı çizili, 3 üstü çizili)", "Renk (sarı, yeşil, pembe, mavi, kırmızı)", "Sayfa aralığı"),
+            listOf(doc.query, "1", "sarı", all),
+            { v ->
+                dialog = null
+                val kind = v[1].trim().toIntOrNull() ?: 1
+                try {
+                    val pages = PdfOps.parseRange(v[3], total)
+                    if (v[0].isBlank()) {
+                        doc.message = "Aranacak metin boş"
+                    } else {
+                        scope.launch {
+                            doc.transformWith<Int>({ n -> if (n == 0) "Eşleşme bulunamadı" else "$n yer işaretlendi" }) { s, o ->
+                                PdfOps2.markText(s, o, pages, v[0].trim(), kind, v[2])
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    doc.message = e.message
+                }
+            },
+            { dialog = null }
+        )
+
+        "note" -> InputDialog("Not ekle", "Not metni (sayfa ${current + 1})", "", { t ->
+            dialog = null
+            val pg = current
+            if (t.isBlank()) {
+                doc.message = "Not boş olamaz"
+            } else {
+                scope.launch { doc.transform("Not eklendi") { s, o -> PdfOps2.addNote(s, o, pg, t.trim()) } }
+            }
+        }, { dialog = null })
+
+        "stamp" -> MultiInputDialog(
+            "Filigran / damga",
+            listOf("Metin ({n} sayfa no, {N} toplam, {tarih})", "Boyut (pt)", "Konum (1-9, 5 orta)", "Açı (derece)", "Opaklık (%)", "Renk (kırmızı, siyah, gri, mavi, yeşil, turuncu)", "Sayfa aralığı"),
+            listOf("TASLAK", "72", "5", "45", "25", "kırmızı", all),
+            { v -> dialog = null; doStamp(v) },
+            { dialog = null }
+        )
+
+        "header" -> MultiInputDialog(
+            "Üst-alt bilgi",
+            listOf("Metin ({n} sayfa no, {N} toplam, {tarih})", "Boyut (pt)", "Konum (2 üst orta, 8 alt orta)", "Açı (derece)", "Opaklık (%)", "Renk", "Sayfa aralığı"),
+            listOf("{n} / {N}", "10", "8", "0", "100", "siyah", all),
+            { v -> dialog = null; doStamp(v) },
+            { dialog = null }
+        )
+
+        "placeimg" -> MultiInputDialog(
+            "Görsel / imza yerleştir",
+            listOf("Sayfa no (1-$total)", "Konum (1-9, 9 sağ alt)", "Genişlik (sayfa genişliğinin %)", "Opaklık (%)"),
+            listOf("${current + 1}", "9", "25", "100"),
+            { v ->
+                dialog = null
+                val pg = v[0].trim().toIntOrNull()
+                val anchor = v[1].trim().toIntOrNull()
+                val w = v[2].trim().toFloatOrNull()
+                val op = v[3].trim().toFloatOrNull()
+                val bytes = pickedImage
+                if (pg == null || anchor == null || w == null || op == null || bytes == null || pg !in 1..total) {
+                    doc.message = "Değerleri kontrol edin"
+                } else {
+                    scope.launch {
+                        doc.transform("Görsel yerleştirildi") { s, o ->
+                            PdfOps2.placePicture(s, o, pg - 1, bytes, anchor, w.coerceIn(2f, 100f), (op / 100f).coerceIn(0.05f, 1f))
+                        }
+                    }
+                }
+            },
+            { dialog = null }
+        )
+
+        "redact" -> InputDialog("Metni kalıcı karart", "Karartılacak ifadeler (; ile ayırın)", "", { t ->
+            dialog = null
+            val terms = t.split(';').map { it.trim() }.filter { it.isNotEmpty() }
+            if (terms.isEmpty()) {
+                doc.message = "İfade girilmedi"
+            } else {
+                scope.launch {
+                    doc.transformWith<Int>({ n -> if (n == 0) "Eşleşme bulunamadı" else "$n yer kalıcı olarak karartıldı" }) { s, o ->
+                        PdfOps2.redact(s, o, terms)
+                    }
+                }
+            }
+        }, { dialog = null })
+
+        "perm" -> PermDialog(
+            { owner, print, copy, modify, annotate ->
+                dialog = null
+                pendingWrite = { u ->
+                    scope.launch {
+                        val tmp = java.io.File(ctx.cacheDir, "perm${System.nanoTime()}.pdf")
+                        val src = doc.file
+                        if (src != null) {
+                            try {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    PdfOps2.restrictPermissions(src, tmp, owner, print, copy, modify, annotate)
+                                    ctx.contentResolver.openOutputStream(u, "wt")!!.use { o -> tmp.inputStream().use { it.copyTo(o) } }
+                                }
+                                doc.message = "Kopya kaydedildi"
+                            } catch (e: Exception) {
+                                doc.message = "Hata: ${e.message}"
+                            } finally {
+                                tmp.delete()
+                            }
+                        }
+                    }
+                }
+                savePdf.launch("${base}_izinli.pdf")
+            },
+            { dialog = null }
+        )
+
+        "report" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Rapor") },
+            text = {
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    Text(report, style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
+        )
+
+        "atts" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Gömülü ekler") },
+            text = {
+                if (atts.isEmpty()) {
+                    Text("Bu belgede gömülü ek yok.")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                        items(atts.size) { i ->
+                            val a = atts[i]
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(a.name, style = MaterialTheme.typography.bodyMedium)
+                                    Text(if (a.size >= 0) "${a.size / 1024} KB" else "", style = MaterialTheme.typography.labelSmall)
+                                }
+                                TextButton(onClick = {
+                                    dialog = null
+                                    pendingWrite = { u -> scope.launch { doc.exportAttachment(u, i) } }
+                                    saveAny.launch(a.name)
+                                }) { Text("Kaydet") }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
+        )
+
         "bookfont" -> AlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text("E-kitap yazı boyutu") },
@@ -569,6 +820,52 @@ fun App(initialUri: Uri?) {
             confirmButton = { TextButton(onClick = { showHits = false }) { Text("Kapat") } }
         )
     }
+}
+
+@Composable
+private fun PermDialog(
+    onConfirm: (String, Boolean, Boolean, Boolean, Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var owner by remember { mutableStateOf("") }
+    var print by remember { mutableStateOf(true) }
+    var copy by remember { mutableStateOf(false) }
+    var modify by remember { mutableStateOf(false) }
+    var annotate by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("İzinleri değiştir") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = owner,
+                    onValueChange = { owner = it },
+                    label = { Text("Sahip şifresi (izinleri değiştirmek için)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = print, onCheckedChange = { print = it })
+                    Text("Yazdırmaya izin ver")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = copy, onCheckedChange = { copy = it })
+                    Text("Metin kopyalamaya izin ver")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = modify, onCheckedChange = { modify = it })
+                    Text("Düzenlemeye izin ver")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = annotate, onCheckedChange = { annotate = it })
+                    Text("Açıklama eklemeye izin ver")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(owner, print, copy, modify, annotate) }) { Text("Kaydet") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Vazgeç") } }
+    )
 }
 
 @Composable
