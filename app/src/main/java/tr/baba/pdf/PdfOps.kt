@@ -241,6 +241,7 @@ object PdfOps {
             val dst = PDFDocument()
             val n = d.countPages()
             for (i in 0 until n) {
+                Progress.step(i, n)
                 val p = d.loadPage(i)
                 val b = Rect(p.getBounds())
                 val w = b.x1 - b.x0
@@ -425,7 +426,9 @@ object PdfOps {
         val z = ZipOutputStream(os)
         val d = Document.openDocument(src.path)
         try {
+            var kk = 0
             for (i in pages) {
+                Progress.step(kk++, pages.size)
                 val p = d.loadPage(i)
                 try {
                     val bmp = AndroidDrawDevice.drawPage(p, 150f)

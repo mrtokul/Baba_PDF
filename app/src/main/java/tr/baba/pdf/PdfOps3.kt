@@ -76,7 +76,9 @@ object PdfOps3 {
         val z = ZipOutputStream(os)
         val seen = HashSet<Int>()
         withPdf(src) { pdf ->
+            var kk = 0
             for (i in pages.sorted()) {
+                Progress.step(kk++, pages.size)
                 val po = pdf.findPage(i)
                 val res = PdfOps2.inherited(po, "Resources") ?: continue
                 val xo = res.get("XObject") ?: continue

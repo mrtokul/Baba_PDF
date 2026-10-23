@@ -3,6 +3,7 @@ package tr.baba.pdf
 import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -35,6 +36,8 @@ class DocState(private val app: Context) {
         private set
     var recentVersion by mutableIntStateOf(0)
         private set
+    var progress by mutableFloatStateOf(-1f)
+        private set
     var message by mutableStateOf<String?>(null)
     var query by mutableStateOf("")
 
@@ -49,8 +52,17 @@ class DocState(private val app: Context) {
 
     private fun bookCfg() = PdfOps.BookCfg(420f, 680f, Recent.bookFontSize(app))
 
+    init {
+        Progress.sink = { done, total -> progress = if (total > 0) done.toFloat() / total else -1f }
+    }
+
+    fun cancel() {
+        Progress.cancelled = true
+    }
+
     private suspend fun guarded(block: suspend () -> Unit) {
         busy = true
+        Progress.reset()
         try {
             block()
         } catch (e: CancellationException) {
@@ -63,6 +75,7 @@ class DocState(private val app: Context) {
             message = "PDF motoru yüklenemedi: ${e.message}"
         } finally {
             busy = false
+            progress = -1f
         }
     }
 
@@ -296,6 +309,20 @@ class DocState(private val app: Context) {
         val src = file ?: return@guarded
         withContext(Dispatchers.IO) { write(uri) { o -> src.inputStream().use { it.copyTo(o) } } }
         message = "Kaydedildi"
+    }
+
+    suspend fun exportKeep(uri: Uri, pages: Set<Int>) = guarded {
+        val src = file ?: return@guarded
+        val tmp = newFile()
+        try {
+            withContext(Dispatchers.IO) {
+                PdfOps.keep(src, tmp, pages)
+                write(uri) { o -> tmp.inputStream().use { it.copyTo(o) } }
+            }
+            message = "Seçili sayfalar kaydedildi"
+        } finally {
+            tmp.delete()
+        }
     }
 
     suspend fun exportEncrypted(uri: Uri, password: String) = guarded {

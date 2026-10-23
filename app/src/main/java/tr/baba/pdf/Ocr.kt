@@ -58,7 +58,9 @@ object Ocr {
         val d = Document.openDocument(src.path)
         try {
             val sb = StringBuilder()
+            var k = 0
             for (i in pages.sorted()) {
+                Progress.step(k++, pages.size)
                 val (bmp, _) = renderPage(d, i)
                 api.setImage(bmp)
                 val t = api.getUTF8Text() ?: ""
@@ -106,7 +108,9 @@ object Ocr {
             val fontRef = pdf.newDictionary()
             // sayfa içerikleri önce toplanır, yazı tipi (ToUnicode) en sonda tamamlanır
             val fontObj = pdf.addObject(fontRef)
+            var k0 = 0
             for (i in pages.sorted()) {
+                Progress.step(k0++, pages.size)
                 val (bmp, s) = renderPage(d, i)
                 api.setImage(bmp)
                 val ws = words(api)

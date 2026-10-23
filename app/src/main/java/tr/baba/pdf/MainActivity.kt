@@ -171,6 +171,7 @@ fun App(initialUri: Uri?) {
         }
     }
 
+    var showGrid by remember { mutableStateOf(false) }
     var editMarkIdx by remember { mutableIntStateOf(0) }
     val saveZipImg = saveZip
     var p12Uri by remember { mutableStateOf<Uri?>(null) }
@@ -298,6 +299,7 @@ fun App(initialUri: Uri?) {
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
                             MenuItem("OCR: taranmış PDF'i aranabilir yap") { menu = false; dialog = "ocrpdf" }
                             MenuItem("OCR: sayfaları metne çıkar (.txt)") { menu = false; dialog = "ocrtxt" }
+                            MenuItem("Sayfa ızgarası (küçük resimler)") { menu = false; showGrid = true }
                             MenuItem("Gömülü görselleri ayıkla (ZIP)") { menu = false; dialog = "imgs" }
                             MenuItem("Sayfa boyutunu değiştir (A4 vb.)") { menu = false; dialog = "psize" }
                             MenuItem("Yan/ters sayfaları otomatik döndür") {
@@ -452,7 +454,16 @@ fun App(initialUri: Uri?) {
                     }
                 }
             }
-            if (doc.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (doc.busy) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (doc.progress >= 0f) {
+                        LinearProgressIndicator(progress = { doc.progress }, modifier = Modifier.weight(1f))
+                    } else {
+                        LinearProgressIndicator(Modifier.weight(1f))
+                    }
+                    TextButton(onClick = { doc.cancel() }) { Text("İptal") }
+                }
+            }
         }
     }
 
@@ -988,6 +999,22 @@ fun App(initialUri: Uri?) {
                 }
             },
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
+        )
+    }
+
+    if (showGrid && renderer != null && total > 0) {
+        PageGridDialog(
+            renderer = renderer,
+            total = total,
+            onGo = { goTo(it + 1) },
+            onDelete = { s -> scope.launch { doc.transform("Sayfalar silindi") { a, o -> PdfOps.delete(a, o, s) } } },
+            onRotate = { s, deg -> scope.launch { doc.transform("Sayfalar döndürüldü") { a, o -> PdfOps.rotate(a, o, s, deg) } } },
+            onMove = { f, t -> scope.launch { doc.transform("Sayfa taşındı") { a, o -> PdfOps.movePage(a, o, f, t) } } },
+            onExtract = { s ->
+                pendingWrite = { u -> scope.launch { doc.exportKeep(u, s) } }
+                savePdf.launch("${base}_secili.pdf")
+            },
+            onDismiss = { showGrid = false }
         )
     }
 
