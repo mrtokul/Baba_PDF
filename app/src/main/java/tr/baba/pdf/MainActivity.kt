@@ -289,6 +289,8 @@ fun App(initialUri: Uri?) {
                             }
                             Header("Araçlar")
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
+                            MenuItem("OCR: taranmış PDF'i aranabilir yap") { menu = false; dialog = "ocrpdf" }
+                            MenuItem("OCR: sayfaları metne çıkar (.txt)") { menu = false; dialog = "ocrtxt" }
                             MenuItem("Boş sayfaları sil") {
                                 menu = false
                                 scope.launch {
@@ -673,6 +675,27 @@ fun App(initialUri: Uri?) {
             },
             { dialog = null }
         )
+
+        "ocrpdf" -> InputDialog("OCR (Türkçe+İngilizce) — uzun sürebilir", "Sayfa aralığı", all, { v ->
+            dialog = null
+            try {
+                val pages = PdfOps.parseRange(v, total)
+                scope.launch { doc.ocrSearchable(pages) }
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
+        }, { dialog = null })
+
+        "ocrtxt" -> InputDialog("OCR metne çıkar", "Sayfa aralığı", all, { v ->
+            dialog = null
+            try {
+                val pages = PdfOps.parseRange(v, total)
+                pendingWrite = { u -> scope.launch { doc.ocrText(u, pages) } }
+                saveTxt.launch("${base}_ocr.txt")
+            } catch (e: Exception) {
+                doc.message = e.message
+            }
+        }, { dialog = null })
 
         "sign" -> MultiInputDialog(
             "Dijital imza",

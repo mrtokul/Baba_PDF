@@ -34,7 +34,7 @@ object PdfOps2 {
         }
     }
 
-    private fun inherited(po: PDFObject, key: String): PDFObject? {
+    internal fun inherited(po: PDFObject, key: String): PDFObject? {
         var o: PDFObject? = po
         var guard = 0
         while (o != null && !o.isNull() && guard < 32) {

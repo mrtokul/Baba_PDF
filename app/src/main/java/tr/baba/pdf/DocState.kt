@@ -399,6 +399,20 @@ class DocState(private val app: Context) {
         }
     }
 
+    suspend fun ocrSearchable(pages: Set<Int>) =
+        transformWith<Int>({ n -> if (n == 0) "Sayfalarda metin bulunamadı" else "$n sayfaya aranabilir metin katmanı eklendi" }) { s, o ->
+            Ocr.makeSearchable(app, s, o, pages)
+        }
+
+    suspend fun ocrText(uri: Uri, pages: Set<Int>) = guarded {
+        val src = file ?: return@guarded
+        withContext(Dispatchers.IO) {
+            val t = Ocr.toText(app, src, pages)
+            write(uri) { o -> o.write(t.toByteArray(Charsets.UTF_8)) }
+        }
+        message = "OCR metni kaydedildi"
+    }
+
     suspend fun signReport(): String {
         val src = file ?: return ""
         busy = true
