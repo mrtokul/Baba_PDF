@@ -171,6 +171,14 @@ fun App(initialUri: Uri?) {
         }
     }
 
+    var p12Uri by remember { mutableStateOf<Uri?>(null) }
+    val p12Launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            p12Uri = uri
+            dialog = "sign"
+        }
+    }
+
     LaunchedEffect(Unit) { initialUri?.let { doc.open(it) } }
     LaunchedEffect(doc.message) {
         doc.message?.let {
@@ -266,6 +274,14 @@ fun App(initialUri: Uri?) {
                             Header("Güvenlik")
                             MenuItem("Şifreli kopya kaydet") { menu = false; dialog = "encrypt" }
                             MenuItem("İzinleri değiştirerek kopya kaydet") { menu = false; dialog = "perm" }
+                            MenuItem("Dijital imzala (.p12 / .pfx)") { menu = false; p12Launcher.launch(arrayOf("*/*")) }
+                            MenuItem("İmzaları doğrula ve rapor") {
+                                menu = false
+                                scope.launch {
+                                    report = doc.signReport()
+                                    dialog = "sigreport"
+                                }
+                            }
                             MenuItem("Metni kalıcı karart (redaction)") { menu = false; dialog = "redact" }
                             MenuItem("Gizli veri ve belge bilgilerini temizle") {
                                 menu = false
@@ -656,6 +672,42 @@ fun App(initialUri: Uri?) {
                 savePdf.launch("${base}_izinli.pdf")
             },
             { dialog = null }
+        )
+
+        "sign" -> MultiInputDialog(
+            "Dijital imza",
+            listOf("Sertifika parolası", "Sayfa (1-$total)", "Görünür kutu (e/h)", "Neden (isteğe bağlı)", "Konum (isteğe bağlı)"),
+            listOf("", "${current + 1}", "e", "", ""),
+            { v ->
+                dialog = null
+                val u = p12Uri
+                val pg = v[1].trim().toIntOrNull()
+                if (u == null || pg == null) {
+                    doc.message = "Geçersiz sayfa numarası"
+                } else {
+                    scope.launch { doc.signWith(u, v[0], pg - 1, !v[2].trim().lowercase().startsWith("h"), v[3], v[4]) }
+                }
+            },
+            { dialog = null }
+        )
+
+        "sigreport" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("İmza raporu") },
+            text = {
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    Text(report, style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    dialog = null
+                    val txt = report
+                    pendingWrite = { u -> scope.launch { doc.writeText(u, txt) } }
+                    saveTxt.launch("${base}_imza_raporu.txt")
+                }) { Text("TXT kaydet") }
+            },
+            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Kapat") } }
         )
 
         "report" -> AlertDialog(

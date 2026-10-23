@@ -309,6 +309,11 @@ class DocState(private val app: Context) {
         message = "Metin kaydedildi"
     }
 
+    suspend fun writeText(uri: Uri, text: String) = guarded {
+        withContext(Dispatchers.IO) { write(uri) { o -> o.write(text.toByteArray(Charsets.UTF_8)) } }
+        message = "Kaydedildi"
+    }
+
     suspend fun exportPng(uri: Uri, pageIndex: Int) = guarded {
         val src = file ?: return@guarded
         withContext(Dispatchers.IO) {
@@ -380,6 +385,30 @@ class DocState(private val app: Context) {
     suspend fun readBytes(uri: Uri): ByteArray = withContext(Dispatchers.IO) {
         val input = app.contentResolver.openInputStream(uri) ?: throw IOException("Dosya açılamadı")
         input.use { it.readBytes() }
+    }
+
+    suspend fun signWith(p12: Uri, pw: String, page: Int, visible: Boolean, reason: String, loc: String) {
+        val tmp = newFile("p12")
+        try {
+            withContext(Dispatchers.IO) { PdfOps.copyUri(app, p12, tmp) }
+            transform("Belge imzalandı (artımlı kayıt)") { s, o ->
+                Signing.sign(s, o, tmp, pw, page, visible, reason, loc)
+            }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    suspend fun signReport(): String {
+        val src = file ?: return ""
+        busy = true
+        return try {
+            withContext(Dispatchers.IO) { Signing.report(src, name) }
+        } catch (e: Exception) {
+            "Hata: ${e.message ?: e.javaClass.simpleName}"
+        } finally {
+            busy = false
+        }
     }
 
     /** Seçilen belgeyle açık belgeyi karşılaştırır; rapor metnini döndürür. */
