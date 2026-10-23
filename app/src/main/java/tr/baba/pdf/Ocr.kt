@@ -61,7 +61,7 @@ object Ocr {
             for (i in pages.sorted()) {
                 val (bmp, _) = renderPage(d, i)
                 api.setImage(bmp)
-                val t = api.utf8Text ?: ""
+                val t = api.getUTF8Text() ?: ""
                 bmp.recycle()
                 sb.append("--- Sayfa ").append(i + 1).append(" ---\n").append(t.trim()).append("\n\n")
             }
@@ -75,7 +75,7 @@ object Ocr {
     private class Word(val text: String, val l: Int, val t: Int, val r: Int, val b: Int)
 
     private fun words(api: TessBaseAPI): List<Word> {
-        api.utf8Text // tanımayı tetikler
+        api.getUTF8Text() // tanımayı tetikler
         val out = ArrayList<Word>()
         val it = api.resultIterator ?: return out
         try {
@@ -169,7 +169,7 @@ object Ocr {
                 done++
             }
             if (done > 0) finishFont(pdf, fontRef, cids)
-            pdf.save(out.path, PdfOps.SAVE)
+            pdf.save(out.path, "garbage=compact,compress=yes")
         } finally {
             d.destroy()
             api.recycle()
