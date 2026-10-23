@@ -36,7 +36,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("com.artifex.mupdf:fitz:1.26.12")
-    implementation("com.github.adaptech-cz:Tesseract4Android:4.7.0")
+    implementation("com.github.adaptech-cz.Tesseract4Android:tesseract4android:4.7.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }
