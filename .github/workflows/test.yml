@@ -30,12 +30,20 @@ jobs:
           arch: x86_64
           target: default
           disable-animations: true
-          script: gradle --no-daemon connectedDebugAndroidTest || true
+          script: |
+            adb logcat -c
+            (adb logcat -v brief TestRunner:I AndroidRuntime:E libc:F DEBUG:F "*:S" > logcat.txt &) 
+            timeout 20m gradle --no-daemon connectedDebugAndroidTest || true
+            adb logcat -d -v brief TestRunner:I AndroidRuntime:E libc:F DEBUG:F "*:S" > logcat.txt || true
       - name: Sonuclari ozetle
         if: always()
         run: |
           python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
+          import glob, os, xml.etree.ElementTree as ET
+          if os.path.exists('logcat.txt'):
+              lines = [l.strip() for l in open('logcat.txt', errors='replace') if 'TestRunner' in l or 'AndroidRuntime' in l or 'F/' in l]
+              for l in lines[-60:]:
+                  print("::notice::LOG " + l[:300])
           tot = fail = 0
           files = glob.glob('app/build/outputs/androidTest-results/**/*.xml', recursive=True)
           if not files:

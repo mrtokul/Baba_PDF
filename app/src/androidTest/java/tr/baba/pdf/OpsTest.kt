@@ -36,6 +36,8 @@ class OpsTest {
     private lateinit var dir: File
     private val cfg = PdfOps.BookCfg(420f, 680f, 12f)
 
+    @get:org.junit.Rule val timeout: org.junit.rules.Timeout = org.junit.rules.Timeout.seconds(90)
+
     @Before fun setUp() {
         dir = File(ctx.cacheDir, "t${System.nanoTime()}").also { it.mkdirs() }
         Progress.reset()
