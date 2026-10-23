@@ -588,4 +588,35 @@ object PdfOps2 {
             d.destroy()
         }
     }
+
+    /** Seçili sayfaların kenarlarını kırpar (CropBox). Değerler puan (pt); sayfa dönük değilse doğrudur. */
+    fun crop(src: File, out: File, pages: Set<Int>, left: Float, top: Float, right: Float, bottom: Float) {
+        withPdf2(src) { pdf ->
+            for (i in pages) {
+                val po = pdf.findPage(i)
+                val mb = inherited(po, "MediaBox") ?: continue
+                if (!mb.isArray() || mb.size() < 4) continue
+                val a = mb.get(0).asFloat(); val b = mb.get(1).asFloat()
+                val c = mb.get(2).asFloat(); val d = mb.get(3).asFloat()
+                val x0 = minOf(a, c) + left
+                val y0 = minOf(b, d) + bottom
+                val x1 = maxOf(a, c) - right
+                val y1 = maxOf(b, d) - top
+                if (x1 - x0 < 20f || y1 - y0 < 20f) throw IllegalArgumentException("Kırpma sayfadan büyük")
+                val arr = pdf.newArray()
+                arr.push(x0); arr.push(y0); arr.push(x1); arr.push(y1)
+                po.put("CropBox", arr)
+            }
+            pdf.save(out.path, "garbage=compact,compress=yes")
+        }
+    }
+
+    private inline fun <T> withPdf2(src: File, block: (PDFDocument) -> T): T {
+        val d = Document.openDocument(src.path)
+        try {
+            return block(d.asPDF())
+        } finally {
+            d.destroy()
+        }
+    }
 }

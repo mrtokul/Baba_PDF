@@ -291,6 +291,37 @@ fun App(initialUri: Uri?) {
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
                             MenuItem("OCR: taranmış PDF'i aranabilir yap") { menu = false; dialog = "ocrpdf" }
                             MenuItem("OCR: sayfaları metne çıkar (.txt)") { menu = false; dialog = "ocrtxt" }
+                            MenuItem("Sayfa kenarlarını kırp") { menu = false; dialog = "crop" }
+                            MenuItem("Yazdır") {
+                                menu = false
+                                doc.file?.let { f ->
+                                    val pm = ctx.getSystemService(android.content.Context.PRINT_SERVICE) as android.print.PrintManager
+                                    pm.print(base, object : android.print.PrintDocumentAdapter() {
+                                        override fun onLayout(
+                                            o: android.print.PrintAttributes?, n: android.print.PrintAttributes?,
+                                            c: android.os.CancellationSignal?, cb: LayoutResultCallback, e: android.os.Bundle?
+                                        ) {
+                                            cb.onLayoutFinished(
+                                                android.print.PrintDocumentInfo.Builder("$base.pdf")
+                                                    .setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                                    .build(), true
+                                            )
+                                        }
+
+                                        override fun onWrite(
+                                            pages: Array<out android.print.PageRange>?, d: android.os.ParcelFileDescriptor,
+                                            c: android.os.CancellationSignal?, cb: WriteResultCallback
+                                        ) {
+                                            try {
+                                                java.io.FileOutputStream(d.fileDescriptor).use { o -> f.inputStream().use { it.copyTo(o) } }
+                                                cb.onWriteFinished(arrayOf(android.print.PageRange.ALL_PAGES))
+                                            } catch (ex: Exception) {
+                                                cb.onWriteFailed(ex.message)
+                                            }
+                                        }
+                                    }, null)
+                                }
+                            }
                             MenuItem("Boş sayfaları sil") {
                                 menu = false
                                 scope.launch {
@@ -672,6 +703,23 @@ fun App(initialUri: Uri?) {
                     }
                 }
                 savePdf.launch("${base}_izinli.pdf")
+            },
+            { dialog = null }
+        )
+
+        "crop" -> MultiInputDialog(
+            "Kenarları kırp (pt; 1 cm ≈ 28)",
+            listOf("Sayfa aralığı", "Sol", "Üst", "Sağ", "Alt"),
+            listOf(all, "0", "0", "0", "0"),
+            { v ->
+                dialog = null
+                try {
+                    val pages = PdfOps.parseRange(v[0], total)
+                    val nums = v.drop(1).map { it.trim().replace(',', '.').toFloat() }
+                    scope.launch { doc.transform("Sayfalar kırpıldı") { s, o -> PdfOps2.crop(s, o, pages, nums[0], nums[1], nums[2], nums[3]) } }
+                } catch (e: Exception) {
+                    doc.message = e.message ?: "Geçersiz değer"
+                }
             },
             { dialog = null }
         )
