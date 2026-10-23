@@ -1,0 +1,55 @@
+name: Emulatorde sinama
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: KVM etkinlestir
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Emulatorde calistir
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: default
+          disable-animations: true
+          script: gradle --no-daemon connectedDebugAndroidTest || true
+      - name: Sonuclari ozetle
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          tot = fail = 0
+          files = glob.glob('app/build/outputs/androidTest-results/**/*.xml', recursive=True)
+          if not files:
+              print("::error::Sinama sonuc dosyasi uretilmedi (emulator veya derleme hatasi)")
+          for f in files:
+              for tc in ET.parse(f).getroot().iter('testcase'):
+                  tot += 1
+                  bad = tc.find('failure') if tc.find('failure') is not None else tc.find('error')
+                  if bad is not None:
+                      fail += 1
+                      msg = (bad.get('message') or bad.text or '')[:400].replace('\n', ' ')
+                      print(f"::error::BASARISIZ {tc.get('name')}: {msg}")
+                  else:
+                      print(f"::notice::GECTI {tc.get('name')}")
+          print(f"::notice::Toplam {tot}, basarisiz {fail}")
+          raise SystemExit(1 if fail or not files else 0)
+          PY
