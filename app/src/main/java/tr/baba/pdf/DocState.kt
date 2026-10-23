@@ -311,6 +311,42 @@ class DocState(private val app: Context) {
         message = "Kaydedildi"
     }
 
+    /** Resimlerden sayfa üretir; belge açıksa sona ekler, değilse yeni belge olur. */
+    suspend fun addImages(uris: List<Uri>) = guarded {
+        val temps = mutableListOf<File>()
+        val made = newFile()
+        val out = newFile()
+        try {
+            withContext(Dispatchers.IO) {
+                for (u in uris) {
+                    val t = newFile("img")
+                    temps.add(t)
+                    PdfOps.copyUri(app, u, t)
+                }
+                PdfOps4.imagesToPdf(temps, made)
+                val cur = file
+                if (cur != null) PdfOps.merge(listOf(cur, made), out) else made.copyTo(out, overwrite = true)
+            }
+            if (file == null) {
+                withContext(Dispatchers.IO) { setDoc(out, "tarama.pdf", false, null) }
+                message = "${uris.size} resimden belge oluşturuldu"
+            } else {
+                swapIn(out, "${uris.size} sayfa eklendi")
+            }
+        } catch (e: Exception) {
+            out.delete()
+            throw e
+        } finally {
+            temps.forEach { it.delete() }
+            made.delete()
+        }
+    }
+
+    suspend fun formFields(): List<PdfOps4.Field> {
+        val src = file ?: return emptyList()
+        return withContext(Dispatchers.IO) { try { PdfOps4.formFields(src) } catch (e: Exception) { emptyList() } }
+    }
+
     suspend fun exportKeep(uri: Uri, pages: Set<Int>) = guarded {
         val src = file ?: return@guarded
         val tmp = newFile()

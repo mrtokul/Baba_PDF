@@ -54,6 +54,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -76,7 +77,9 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val initial: Uri? = intent?.data
+        val initial: Uri? = intent?.data ?: (
+            @Suppress("DEPRECATION") intent?.getParcelableExtra<Uri>(android.content.Intent.EXTRA_STREAM)
+        )
         setContent {
             val scheme = if (isSystemInDarkTheme()) {
                 darkColorScheme(primary = Color(0xFFB9AAF0), background = Color(0xFF25232E), surface = Color(0xFF2F2C3B))
@@ -171,6 +174,16 @@ fun App(initialUri: Uri?) {
         }
     }
 
+    var formList by remember { mutableStateOf<List<PdfOps4.Field>>(emptyList()) }
+    val formEdits = remember { mutableStateMapOf<Pair<Int, Int>, String>() }
+    var camUri by remember { mutableStateOf<Uri?>(null) }
+    val imagesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { list ->
+        if (list.isNotEmpty()) scope.launch { doc.addImages(list) }
+    }
+    val camLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val u = camUri
+        if (ok && u != null) scope.launch { doc.addImages(listOf(u)) }
+    }
     var showGrid by remember { mutableStateOf(false) }
     var editMarkIdx by remember { mutableIntStateOf(0) }
     val saveZipImg = saveZip
@@ -224,6 +237,19 @@ fun App(initialUri: Uri?) {
                         )
                         Header("Dosya")
                         MenuItem("Belge aç (PDF, e-kitap)") { menu = false; openLauncher.launch(arrayOf("*/*")) }
+                        MenuItem("Kamerayla sayfa tara / ekle") {
+                            menu = false
+                            try {
+                                val dir = java.io.File(ctx.cacheDir, "cam").also { it.mkdirs() }
+                                val f = java.io.File(dir, "c${System.nanoTime()}.jpg")
+                                val u = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f)
+                                camUri = u
+                                camLauncher.launch(u)
+                            } catch (e: Exception) {
+                                doc.message = "Kamera açılamadı: ${e.message}"
+                            }
+                        }
+                        MenuItem("Resimlerden PDF yap / sayfa ekle") { menu = false; imagesLauncher.launch(arrayOf("image/*")) }
                         MenuItem("Belge ekle / birleştir") { menu = false; mergeLauncher.launch(arrayOf("*/*")) }
                         if (hasDoc) {
                             if (doc.canOverwrite) MenuItem("Kaydet (özgün dosyanın üzerine)") { menu = false; dialog = "overwrite" }
@@ -299,6 +325,19 @@ fun App(initialUri: Uri?) {
                             MenuItem("PDF boyutunu küçült") { menu = false; dialog = "compress" }
                             MenuItem("OCR: taranmış PDF'i aranabilir yap") { menu = false; dialog = "ocrpdf" }
                             MenuItem("OCR: sayfaları metne çıkar (.txt)") { menu = false; dialog = "ocrtxt" }
+                            MenuItem("Form doldur") {
+                                menu = false
+                                scope.launch {
+                                    val l = doc.formFields()
+                                    if (l.isEmpty()) {
+                                        doc.message = "Bu belgede doldurulabilir form alanı yok"
+                                    } else {
+                                        formEdits.clear()
+                                        formList = l
+                                        dialog = "form"
+                                    }
+                                }
+                            }
                             MenuItem("Sayfa ızgarası (küçük resimler)") { menu = false; showGrid = true }
                             MenuItem("Gömülü görselleri ayıkla (ZIP)") { menu = false; dialog = "imgs" }
                             MenuItem("Sayfa boyutunu değiştir (A4 vb.)") { menu = false; dialog = "psize" }
@@ -733,6 +772,50 @@ fun App(initialUri: Uri?) {
                 savePdf.launch("${base}_izinli.pdf")
             },
             { dialog = null }
+        )
+
+        "form" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Form doldur") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                    items(formList.size) { n ->
+                        val f = formList[n]
+                        val key = f.page to f.index
+                        val label = (f.name.ifBlank { "Alan ${n + 1}" }) + "  (s. ${f.page + 1})"
+                        if (f.type == com.artifex.mupdf.fitz.PDFWidget.TYPE_CHECKBOX || f.type == com.artifex.mupdf.fitz.PDFWidget.TYPE_RADIOBUTTON) {
+                            val on = (formEdits[key] ?: if (f.value.isNotEmpty() && f.value != "Off") "1" else "0") == "1"
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.material3.Checkbox(
+                                    checked = on, enabled = !f.readOnly,
+                                    onCheckedChange = { formEdits[key] = if (it) "1" else "0" }
+                                )
+                                Text(label)
+                            }
+                        } else {
+                            OutlinedTextField(
+                                value = formEdits[key] ?: f.value,
+                                onValueChange = { formEdits[key] = it },
+                                enabled = !f.readOnly,
+                                label = { Text(label + if (f.options.isNotEmpty()) " [" + f.options.joinToString(" | ") + "]" else "") },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    dialog = null
+                    val ch = HashMap(formEdits.toMap())
+                    if (ch.isEmpty()) {
+                        doc.message = "Değişiklik yok"
+                    } else {
+                        scope.launch { doc.transform("Form dolduruldu") { s, o -> PdfOps4.fillForm(s, o, ch) } }
+                    }
+                }) { Text("Uygula") }
+            },
+            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Vazgeç") } }
         )
 
         "editmark" -> MultiInputDialog(
